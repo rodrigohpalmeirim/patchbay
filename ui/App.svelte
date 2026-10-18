@@ -11,10 +11,12 @@
   import FileConflictDialog from "./lib/dialogs/FileConflictDialog.svelte";
   import PermissionsDialog from "./lib/dialogs/PermissionsDialog.svelte";
   import ConfirmDialog from "./lib/dialogs/ConfirmDialog.svelte";
+  import ConnectAsDialog from "./lib/dialogs/ConnectAsDialog.svelte";
   import ForwardEditor from "./lib/dialogs/ForwardEditor.svelte";
   import HostEditor from "./lib/dialogs/HostEditor.svelte";
   import PromptDialog from "./lib/dialogs/PromptDialog.svelte";
   import SettingsDialog from "./lib/dialogs/SettingsDialog.svelte";
+  import ShareSshDialog from "./lib/dialogs/ShareSshDialog.svelte";
   import SnippetsDialog from "./lib/dialogs/SnippetsDialog.svelte";
   import WarningsDialog from "./lib/dialogs/WarningsDialog.svelte";
   import { startApp } from "./lib/stores/app";
@@ -172,6 +174,14 @@
   {#key ui.forwardEditor}
     <ForwardEditor editor={ui.forwardEditor} />
   {/key}
+{/if}
+{#if ui.connectAs}
+  {#key ui.connectAs}
+    <ConnectAsDialog request={ui.connectAs} />
+  {/key}
+{/if}
+{#if ui.shareOffer && !prompts.current && !ui.editor}
+  <ShareSshDialog />
 {/if}
 {#if ui.menu}
   <ContextMenu menu={ui.menu} />

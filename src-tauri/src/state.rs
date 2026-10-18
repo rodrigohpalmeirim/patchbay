@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use patchbay_core::dragout::DragOutCache;
@@ -12,6 +12,7 @@ use patchbay_core::search::SearchManager;
 use patchbay_core::session::SessionManager;
 use patchbay_core::settings::SettingsStore;
 use patchbay_core::snippets::SnippetStore;
+use patchbay_core::tailscale;
 use patchbay_core::terminal::TerminalManager;
 use patchbay_core::transfer::TransferManager;
 use serde::Serialize;
@@ -38,6 +39,8 @@ pub struct AppState {
     /// Set once the user chose to quit, so closing the window is no longer
     /// turned into hiding it.
     pub quitting: AtomicBool,
+    /// The tailnet has been read at least once (see `ensure_tailnet`).
+    tailnet_checked: AtomicBool,
     pending_prompts: Mutex<HashMap<Uuid, oneshot::Sender<PromptResponse>>>,
 }
 
@@ -66,7 +69,18 @@ impl AppState {
         let (prompts, prompts_rx) = mpsc::channel(16);
         let sessions = SessionManager::new(events.clone(), prompts.clone());
         let fs = FileSystem::new(sessions.clone());
-        let hosts = Arc::new(RwLock::new(HostStore::load_default()?));
+        let hosts = HostStore::load_default()?;
+        // References to hosts renamed while they couldn't follow (e.g. hosts
+        // moved to patchbay.conf on first launch).
+        let mut forward_store = ForwardStore::load_default()?;
+        let mut snippet_store = SnippetStore::load_default()?;
+        if let Err(e) = forward_store.rename_hosts(hosts.renamed()) {
+            tracing::warn!("could not update port forwards of renamed hosts: {e}");
+        }
+        if let Err(e) = snippet_store.rename_hosts(hosts.renamed()) {
+            tracing::warn!("could not update snippets of renamed hosts: {e}");
+        }
+        let hosts = Arc::new(RwLock::new(hosts));
         let settings_path = SettingsStore::default_path()?;
         let settings = SettingsStore::load(settings_path.clone()).unwrap_or_else(|e| {
             tracing::warn!("ignoring unreadable settings, using defaults: {e}");
@@ -86,10 +100,10 @@ impl AppState {
                 sessions.clone(),
                 hosts.clone(),
                 events.clone(),
-                ForwardStore::load_default()?,
+                forward_store,
             ),
             hosts,
-            snippets: RwLock::new(SnippetStore::load_default()?),
+            snippets: RwLock::new(snippet_store),
             transfers,
             edits,
             dragout,
@@ -101,6 +115,7 @@ impl AppState {
             events,
             settings: Mutex::new(settings),
             quitting: AtomicBool::new(false),
+            tailnet_checked: AtomicBool::new(false),
             pending_prompts: Mutex::new(HashMap::new()),
         };
         Ok((state, events_rx, prompts_rx))
@@ -185,6 +200,66 @@ impl AppState {
             }
         }
         self.forwards.sync_config_rules().await;
+        self.refresh_tailnet().await;
         Ok(())
+    }
+
+    /// Re-reads the tailnet (when enabled) and emits `HostsChanged` if the
+    /// host list differs. Keeps the last known devices if Tailscale doesn't
+    /// answer.
+    /// Reads the tailnet unless that has happened already, so the first host
+    /// list (and the tabs restored from it) includes Tailscale devices.
+    pub async fn ensure_tailnet(&self) {
+        if !self.tailnet_checked.load(Ordering::Relaxed) {
+            self.refresh_tailnet().await;
+        }
+    }
+
+    pub async fn refresh_tailnet(&self) {
+        self.tailnet_checked.store(true, Ordering::Relaxed);
+        let tailnet = if self.current_settings().tailscale {
+            match tailscale::status().await {
+                Ok(status) => status,
+                Err(e) => {
+                    tracing::debug!("tailscale status: {e}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let gone: Vec<HostId> = {
+            let mut hosts = self.hosts.write().await;
+            let before = hosts.list();
+            hosts.set_tailnet(tailnet);
+            if hosts.list() == before {
+                return;
+            }
+            let _ = self.events.send(CoreEvent::HostsChanged);
+            before
+                .into_iter()
+                .filter(|h| h.id.starts_with("ts:") && hosts.get(&h.id).is_none())
+                .map(|h| h.id)
+                .collect()
+        };
+        // Their tabs close; don't leave the connections running unseen.
+        for id in gone {
+            self.sessions.disconnect(&id).await;
+        }
+    }
+
+    /// Points saved port forwards and snippets at the new ids of renamed
+    /// hosts.
+    pub async fn follow_renames(&self, renamed: &BTreeMap<HostId, HostId>) {
+        if let Err(e) = self.forwards.rename_hosts(renamed).await {
+            tracing::warn!("could not update port forwards of renamed hosts: {e}");
+        }
+        match self.snippets.write().await.rename_hosts(renamed) {
+            Ok(true) => {
+                let _ = self.events.send(CoreEvent::SnippetsChanged);
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!("could not update snippets of renamed hosts: {e}"),
+        }
     }
 }

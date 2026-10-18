@@ -6,9 +6,14 @@ export function address(host: Pick<Host, "user" | "hostname" | "port">): string 
   return host.port && host.port !== 22 ? `${base}:${host.port}` : base;
 }
 
-/** An equivalent `ssh` command line, for copying. */
-export function sshCommand(host: Host): string {
-  if (host.source === "sshConfig") return `ssh ${host.name}`;
+/**
+ * An equivalent `ssh` command line, for copying. `shared`: ssh sees the hosts
+ * saved in Patchbay (~/.ssh/config includes patchbay.conf).
+ */
+export function sshCommand(host: Host, shared = false): string {
+  if (host.source === "sshConfig" || (host.source === "app" && shared)) return `ssh ${host.name}`;
+  // ssh applies ~/.ssh/config to the MagicDNS name itself.
+  if (host.source === "tailscale") return `ssh ${host.user ? `${host.user}@` : ""}${host.hostname}`;
   const parts = ["ssh"];
   if (host.port !== 22) parts.push("-p", String(host.port));
   for (const f of host.identityFiles) parts.push("-i", quote(f));
@@ -19,6 +24,28 @@ export function sshCommand(host: Host): string {
 
 function quote(s: string): string {
   return /^[\w@%+=:,./~-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** RemoteOs for Tailscale's OS names ("linux", "macOS", "windows", ...). */
+export function tailscaleOs(os: string): RemoteOs {
+  switch (os.toLowerCase()) {
+    case "linux":
+      return "linux";
+    case "macos":
+      return "macOs";
+    case "windows":
+      return "windows";
+    case "freebsd":
+    case "openbsd":
+      return "bsd";
+    default:
+      return "unknown";
+  }
+}
+
+/** The first http(s) link in `text`. */
+export function firstUrl(text: string): string | null {
+  return text.match(/https?:\/\/[^\s<>"']+/)?.[0] ?? null;
 }
 
 export function osLabel(os: RemoteOs): string {

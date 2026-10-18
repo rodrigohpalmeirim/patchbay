@@ -18,6 +18,7 @@
   } from "../stores/settings.svelte";
   import { ui } from "../stores/ui.svelte";
   import { appSettings, MAX_TRANSFERS_LIMITS } from "../stores/appSettings.svelte";
+  import { hosts } from "../stores/hosts.svelte";
   import type { ReconnectMode } from "../stores/settings.svelte";
 
   const themes: { value: ThemePref; label: string; icon: typeof Sun }[] = [
@@ -76,6 +77,16 @@
   }
 
   const app = $derived(appSettings.value);
+
+  let sharingBusy = $state(false);
+  async function setSharing(input: HTMLInputElement) {
+    sharingBusy = true;
+    try {
+      if (!(await hosts.setSharing(input.checked))) input.checked = !input.checked;
+    } finally {
+      sharingBusy = false;
+    }
+  }
   const transferChoices = Array.from({ length: MAX_TRANSFERS_LIMITS[1] - MAX_TRANSFERS_LIMITS[0] + 1 }, (_, i) => i + MAX_TRANSFERS_LIMITS[0]);
   const sessionPrefs = $derived(settings.session);
   const reconnectModes: { value: ReconnectMode; label: string; desc: string }[] = [
@@ -192,6 +203,38 @@
       {:else}
         <p class="desc">Couldn’t load these settings from Patchbay’s backend.</p>
       {/if}
+    </section>
+
+    <section class="section" aria-labelledby="hosts-title">
+      <div class="section-head">
+        <h3 class="section-title" id="hosts-title">Hosts</h3>
+      </div>
+      <div class="checks">
+        <label class="checkbox opt">
+          <input
+            type="checkbox"
+            checked={hosts.sharing?.shared ?? false}
+            disabled={!hosts.sharing || sharingBusy}
+            onchange={(e) => void setSharing(e.currentTarget)}
+          />
+          <span>
+            <span class="opt-label">Let ssh use the hosts saved in Patchbay</span>
+            <span class="desc">
+              Adds <code>Include patchbay.conf</code> to the top of <code>~/.ssh/config</code>, so commands like
+              <code>ssh my-server</code> work in a terminal too.
+            </span>
+          </span>
+        </label>
+        {#if app}
+          <label class="checkbox opt">
+            <input type="checkbox" checked={app.tailscale} onchange={(e) => void appSettings.set({ tailscale: e.currentTarget.checked })} />
+            <span>
+              <span class="opt-label">Show devices on my tailnet</span>
+              <span class="desc">Lists the machines on your Tailscale network when Tailscale is installed and running.</span>
+            </span>
+          </label>
+        {/if}
+      </div>
     </section>
 
     <section class="section" aria-labelledby="session-title">

@@ -9,7 +9,6 @@ import Play from "@lucide/svelte/icons/play";
 import Server from "@lucide/svelte/icons/server";
 import Square from "@lucide/svelte/icons/square";
 import Trash2 from "@lucide/svelte/icons/trash-2";
-import { isTauri } from "../api";
 import { forwards, isRunning } from "../stores/forwards.svelte";
 import { hosts } from "../stores/hosts.svelte";
 import { tabs } from "../stores/tabs.svelte";
@@ -17,7 +16,7 @@ import { toasts } from "../stores/toasts.svelte";
 import { ui, type MenuItem } from "../stores/ui.svelte";
 import type { HostId, PortForward, PortForwardDraft, PortForwardKind, PortForwardStatus } from "../types";
 import { writeClipboard } from "../util/clipboard";
-import { toCommandError } from "../util/errors";
+import { openInBrowser } from "../util/links";
 
 export const KIND_LABEL: Record<PortForwardKind, string> = {
   local: "Local",
@@ -125,19 +124,6 @@ export function browserUrl(f: PortForward, s: PortForwardStatus): string | null 
   const tls = TLS_PORTS.has(f.targetPort ?? -1) || /^https:/i.test(f.targetHost ?? "");
   const host = isAllInterfaces(f.bindAddress) || isLoopback(f.bindAddress) ? "localhost" : f.bindAddress!;
   return `${tls ? "https" : "http"}://${hostPort(host, port)}/`;
-}
-
-export async function openInBrowser(url: string) {
-  try {
-    if (isTauri) {
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl(url);
-    } else {
-      window.open(url, "_blank", "noopener,noreferrer");
-    }
-  } catch (e) {
-    toasts.error(toCommandError(e), "Couldn't open the browser");
-  }
 }
 
 export async function copyAddress(f: PortForward) {

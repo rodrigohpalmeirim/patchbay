@@ -75,13 +75,15 @@ function parseLayout(raw: unknown, depth = 0): PaneNode | null {
   return { type: "split", id, dir: raw.dir, ratio, a, b };
 }
 
-function parseTab(raw: unknown, hostExists: (id: HostId) => boolean): Tab | null {
+/** `currentId` maps a saved host id to the host's current id, or null if it is gone. */
+function parseTab(raw: unknown, currentId: (id: HostId) => HostId | null): Tab | null {
   if (!isObj(raw)) return null;
   const id = str(raw.id);
   if (!id) return null;
-  const hostId = raw.hostId === null ? null : str(raw.hostId);
-  if (hostId === null && raw.hostId !== null) return null;
-  if (hostId !== null && !hostExists(hostId)) return null;
+  const savedId = raw.hostId === null ? null : str(raw.hostId);
+  if (savedId === null && raw.hostId !== null) return null;
+  const hostId = savedId === null ? null : currentId(savedId);
+  if (savedId !== null && hostId === null) return null;
   switch (raw.kind) {
     case "host":
       return hostId ? { id, kind: "host", hostId } : null;
@@ -111,13 +113,13 @@ function parseTab(raw: unknown, hostExists: (id: HostId) => boolean): Tab | null
 }
 
 /** Validates stored data into a consistent layout, or null if there's nothing to restore. */
-function parse(raw: unknown, hostExists: (id: HostId) => boolean) {
+function parse(raw: unknown, currentId: (id: HostId) => HostId | null) {
   if (!isObj(raw) || raw.version !== VERSION || !Array.isArray(raw.tabs) || !Array.isArray(raw.groups)) return null;
   const list: Tab[] = [];
   const seen = new Set<string>();
   const singletons = new Set<string>();
   for (const t of raw.tabs.slice(0, MAX_TABS)) {
-    const tab = parseTab(t, hostExists);
+    const tab = parseTab(t, currentId);
     if (!tab || seen.has(tab.id)) continue;
     // Host overviews and forwards views exist once per host.
     if (tab.kind === "host" || tab.kind === "forwards") {
@@ -183,7 +185,7 @@ class Session {
       } catch {
         return false;
       }
-      const state = parse(raw, (id) => hosts.byId.has(id));
+      const state = parse(raw, (id) => hosts.currentId(id));
       if (!state || !state.list.length) return false;
       const eager = settings.session.reconnect === "eager";
       tabs.replaceAll({ ...state, dormant: eager ? [] : state.list.map((t) => t.id) });

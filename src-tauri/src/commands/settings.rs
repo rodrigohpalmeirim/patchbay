@@ -1,7 +1,7 @@
 //! Settings the backend acts on. Changes are broadcast as `settingsChanged`.
 
 use patchbay_core::model::{AppSettings, CoreEvent};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 #[cfg(not(windows))]
 use tauri_plugin_autostart::ManagerExt;
 
@@ -22,7 +22,14 @@ pub fn settings_set(
     settings: AppSettings,
 ) -> CommandResult<AppSettings> {
     apply_launch_at_login(&app, settings.launch_at_login)?;
+    let tailscale_before = state.current_settings().tailscale;
     let saved = state.settings().set(settings)?;
+    if saved.tailscale != tailscale_before {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            app.state::<AppState>().refresh_tailnet().await;
+        });
+    }
     state
         .transfers
         .set_max_concurrent(saved.max_concurrent_transfers.into());

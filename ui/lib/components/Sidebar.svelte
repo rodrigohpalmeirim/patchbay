@@ -28,7 +28,6 @@
   import TransferIndicator from "./TransferIndicator.svelte";
   import Cable from "@lucide/svelte/icons/cable";
   import { forwards } from "../stores/forwards.svelte";
-  import Logo from "./Logo.svelte";
 
   interface Section {
     key: string;
@@ -52,22 +51,26 @@
     const sort = (a: (typeof matched)[number], b: (typeof matched)[number]) =>
       searching ? b.score - a.score || collator.compare(a.host.name, b.host.name) : collator.compare(a.host.name, b.host.name);
 
-    const cfg = matched.filter((m) => m.host.source === "sshConfig").sort(sort);
-    const app = matched.filter((m) => m.host.source === "app");
-    const groups = new Map<string, typeof matched>();
+    // Hosts from ssh_config (the user's and Patchbay's) in one list unless
+    // grouped, then the devices on the tailnet.
     const ungrouped: typeof matched = [];
-    for (const m of app) {
-      if (m.host.group) groups.set(m.host.group, [...(groups.get(m.host.group) ?? []), m]);
+    const groups = new Map<string, typeof matched>();
+    const tailnet: typeof matched = [];
+    for (const m of matched) {
+      if (m.host.source === "tailscale") tailnet.push(m);
+      else if (m.host.group) groups.set(m.host.group, [...(groups.get(m.host.group) ?? []), m]);
       else ungrouped.push(m);
     }
     const out: Section[] = [];
-    if (cfg.length) out.push({ key: "cfg", label: "SSH config", hosts: cfg });
+    if (ungrouped.length) out.push({ key: "hosts", label: "Hosts", hosts: ungrouped.sort(sort) });
     for (const g of [...groups.keys()].sort(collator.compare)) {
       out.push({ key: `group:${g}`, label: g, hosts: groups.get(g)!.sort(sort) });
     }
-    if (ungrouped.length) {
-      const label = hosts.groups.length ? "Ungrouped" : "Patchbay hosts";
-      out.push({ key: "ungrouped", label, hosts: ungrouped.sort(sort) });
+    if (tailnet.length) {
+      const online = (m: (typeof matched)[number]) => (m.host.tailscale?.online ? 0 : 1);
+      const byOnline = (a: (typeof matched)[number], b: (typeof matched)[number]) =>
+        searching ? sort(a, b) : online(a) - online(b) || sort(a, b);
+      out.push({ key: "tailscale", label: "Tailscale", hosts: tailnet.sort(byOnline) });
     }
     return out;
   });
@@ -208,36 +211,32 @@
 </script>
 
 <aside class="sidebar" style:width="{settings.sidebarWidth}px" class:resizing aria-label="Hosts sidebar">
-  <header class="brand">
-    <Logo size={22} />
-    <span class="wordmark">Patchbay</span>
-    <span class="spacer"></span>
+  <header class="head">
+    <div class="search">
+      <Search size={14} class="search-icon" />
+      <input
+        bind:this={searchEl}
+        bind:value={query}
+        type="text"
+        placeholder="Search hosts"
+        aria-label="Search hosts"
+        aria-controls="host-list"
+        autocomplete="off"
+        spellcheck="false"
+        onkeydown={onsearchkeydown}
+      />
+      {#if query}
+        <button class="icon-btn sm clear" aria-label="Clear search" onclick={() => ((query = ""), searchEl?.focus())}>
+          <X size={13} />
+        </button>
+      {:else}
+        <kbd aria-hidden="true">/</kbd>
+      {/if}
+    </div>
     <button class="icon-btn" title="Add host ({modKey}+N)" aria-label="Add host" onclick={() => newHost()}>
       <Plus size={16} />
     </button>
   </header>
-
-  <div class="search">
-    <Search size={14} class="search-icon" />
-    <input
-      bind:this={searchEl}
-      bind:value={query}
-      type="text"
-      placeholder="Search hosts"
-      aria-label="Search hosts"
-      aria-controls="host-list"
-      autocomplete="off"
-      spellcheck="false"
-      onkeydown={onsearchkeydown}
-    />
-    {#if query}
-      <button class="icon-btn sm clear" aria-label="Clear search" onclick={() => ((query = ""), searchEl?.focus())}>
-        <X size={13} />
-      </button>
-    {:else}
-      <kbd aria-hidden="true">/</kbd>
-    {/if}
-  </div>
 
   <div class="local-row">
     <button
@@ -408,18 +407,13 @@
     background: var(--bg-sidebar);
     border-right: 1px solid var(--border);
   }
-  .brand {
+  .head {
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 6px;
     height: var(--tabstrip-h);
-    padding: 0 10px 0 14px;
+    padding: 0 8px 0 10px;
     flex: none;
-  }
-  .wordmark {
-    font-size: var(--text-md);
-    font-weight: var(--weight-semibold);
-    letter-spacing: -0.01em;
   }
   .spacer {
     flex: 1;
@@ -428,9 +422,9 @@
   .search {
     position: relative;
     display: flex;
+    flex: 1;
     align-items: center;
-    margin: 4px 10px 8px;
-    flex: none;
+    min-width: 0;
   }
   .search :global(.search-icon) {
     position: absolute;

@@ -13,6 +13,12 @@
 //   prod-web-01    keyboard-interactive 2FA
 //   staging-api    authentication fails
 //   win-buildbox   Windows OpenSSH
+//   Tailscale (shown while the "tailnet" setting is on):
+//   nas            no user known yet -> "Connect as" dialog, then key auth
+//   gpu-box        Tailscale SSH "check" mode: login banner with a link, then
+//                  connects after a few seconds
+//   studio-mac     offline (times out)
+//   win-desktop    Windows, user already remembered
 //
 // Files, transfers and search live in mock/ (files.ts = commands, trees.ts =
 // per-host filesystem contents, vfs.ts = model, content.ts = file contents).
@@ -108,7 +114,7 @@ const INITIAL_HOSTS: Host[] = [
     tags: [],
   },
   {
-    id: "app:6f1c2a90-raspberrypi",
+    id: "cfg:raspberrypi",
     name: "raspberrypi",
     source: "app",
     hostname: "192.168.1.40",
@@ -120,7 +126,7 @@ const INITIAL_HOSTS: Host[] = [
     tags: ["arm", "pi"],
   },
   {
-    id: "app:0b7e44d1-media-share",
+    id: "cfg:media-share",
     name: "media-share",
     source: "app",
     hostname: "media.home.arpa",
@@ -132,7 +138,7 @@ const INITIAL_HOSTS: Host[] = [
     tags: ["sftp", "storage"],
   },
   {
-    id: "app:9a3d5e2f-prod-web-01",
+    id: "cfg:prod-web-01",
     name: "prod-web-01",
     source: "app",
     hostname: "web01.prod.example.com",
@@ -144,7 +150,7 @@ const INITIAL_HOSTS: Host[] = [
     tags: ["prod", "nginx"],
   },
   {
-    id: "app:47c8b1aa-staging-api",
+    id: "cfg:staging-api",
     name: "staging-api",
     source: "app",
     hostname: "api.staging.example.com",
@@ -156,7 +162,7 @@ const INITIAL_HOSTS: Host[] = [
     tags: ["staging", "api"],
   },
   {
-    id: "app:d2e9f310-win-buildbox",
+    id: "cfg:win-buildbox",
     name: "win-buildbox",
     source: "app",
     hostname: "10.20.0.15",
@@ -168,6 +174,46 @@ const INITIAL_HOSTS: Host[] = [
     tags: ["windows"],
   },
 ];
+
+const TS_SUFFIX = "tail1234.ts.net";
+
+/** Devices on the mock tailnet (ids are `ts:<node id>`). */
+const INITIAL_TAILNET: Host[] = [
+  tailscaleHost("nAb12CNTRL", "nas", "linux", "100.101.7.12", { ssh: true }),
+  tailscaleHost("nGp9xCNTRL", "gpu-box", "linux", "100.88.2.40", { ssh: true, user: "ml" }),
+  tailscaleHost("nMc33CNTRL", "studio-mac", "macOS", "100.70.11.3", { online: false }),
+  tailscaleHost("nWd5kCNTRL", "win-desktop", "windows", "100.92.45.8", { user: "rodrigo" }),
+];
+
+function tailscaleHost(
+  node: string,
+  name: string,
+  os: string,
+  ip: string,
+  { ssh = false, online = true, user = null }: { ssh?: boolean; online?: boolean; user?: string | null } = {},
+): Host {
+  return {
+    id: `ts:${node}`,
+    name,
+    source: "tailscale",
+    hostname: `${name}.${TS_SUFFIX}`,
+    port: 22,
+    user,
+    identityFiles: [],
+    proxyJump: null,
+    group: null,
+    tags: [],
+    tailscale: {
+      online,
+      os,
+      dnsName: `${name}.${TS_SUFFIX}`,
+      ips: [ip],
+      ssh,
+      owner: "rodrigo@example.com",
+      userSuggestions: [...new Set([...(user ? [user] : []), "rodrigo", ...(os === "linux" ? ["root"] : [])])],
+    },
+  };
+}
 
 const WARNINGS = [
   "~/.ssh/config:42: unsupported option `ControlMaster` (ignored)",
@@ -183,7 +229,9 @@ type Scenario =
   | { kind: "changedKey"; caps: RemoteCapabilities }
   | { kind: "passphrase"; caps: RemoteCapabilities }
   | { kind: "twoFactor"; caps: RemoteCapabilities }
-  | { kind: "authFailed" };
+  | { kind: "authFailed" }
+  | { kind: "approval"; caps: RemoteCapabilities }
+  | { kind: "offline" };
 
 const SCENARIOS: Record<string, Scenario> = {
   bastion: { kind: "ok", caps: { ...LINUX, home: "/home/ops" } },
@@ -195,6 +243,12 @@ const SCENARIOS: Record<string, Scenario> = {
   "prod-web-01": { kind: "twoFactor", caps: { ...LINUX, home: "/home/deploy" } },
   "staging-api": { kind: "authFailed" },
   "win-buildbox": {
+    kind: "ok",
+    caps: { sftp: true, exec: true, os: "windows", home: "C:\\Users\\rodrigo" },
+  },
+  "gpu-box": { kind: "approval", caps: { ...LINUX, home: "/home/ml" } },
+  "studio-mac": { kind: "offline" },
+  "win-desktop": {
     kind: "ok",
     caps: { sftp: true, exec: true, os: "windows", home: "C:\\Users\\rodrigo" },
   },
@@ -244,13 +298,22 @@ const INITIAL_SNIPPETS: Snippet[] = [
     id: "snip-nginx",
     name: "Reload nginx",
     command: "sudo nginx -t && sudo systemctl reload nginx",
-    hostIds: ["app:9a3d5e2f-prod-web-01", "app:47c8b1aa-staging-api"],
+    hostIds: ["cfg:prod-web-01", "cfg:staging-api"],
     run: false,
   },
 ];
 
 export function createMockBackend(): Backend {
-  let hosts: Host[] = structuredClone(INITIAL_HOSTS);
+  let configHosts: Host[] = structuredClone(INITIAL_HOSTS);
+  let tailnet: Host[] = structuredClone(INITIAL_TAILNET);
+  let hosts: Host[] = [...configHosts, ...tailnet];
+  let tailscaleOn = true;
+  /** Recomputes `hosts` (the tailnet is listed while the setting is on). */
+  const relist = () => {
+    hosts = [...configHosts, ...(tailscaleOn ? tailnet : [])];
+  };
+  const renamed: Record<HostId, HostId> = {};
+  let sharing = { shared: false, path: `${HOME}/.ssh/patchbay.conf` };
   let snippets: Snippet[] = structuredClone(INITIAL_SNIPPETS);
   const eventHandlers = new Set<(e: CoreEvent) => void>();
   const promptHandlers = new Set<(p: PromptPayload) => void>();
@@ -329,7 +392,7 @@ export function createMockBackend(): Backend {
     return out;
   };
 
-  async function runConnect(host: Host, signal: AbortSignal): Promise<RemoteCapabilities> {
+  async function runConnect(host: Host, user: string, signal: AbortSignal): Promise<RemoteCapabilities> {
     const scenario: Scenario = SCENARIOS[host.name] ?? {
       kind: "ok",
       caps: { ...LINUX, home: `/home/${host.user ?? "user"}` },
@@ -344,8 +407,10 @@ export function createMockBackend(): Backend {
     conn({ state: "connecting", hop: null });
     await delay(800, signal);
 
-    const user = host.user ?? "rodrigo";
     switch (scenario.kind) {
+      case "offline":
+        await delay(4000, signal);
+        throw err("timeout", `timed out: connecting to ${host.tailscale?.ips[0] ?? host.hostname}:22`);
       case "changedKey": {
         const r = await ask(
           host.id,
@@ -389,6 +454,15 @@ export function createMockBackend(): Backend {
 
     conn({ state: "authenticating" });
     await delay(600, signal);
+    if (scenario.kind === "approval") {
+      emit({
+        type: "authBanner",
+        hostId: host.id,
+        message:
+          "# Tailscale SSH requires an additional check.\n# To authenticate, visit: https://login.tailscale.com/a/1a2b3c4d5e6f",
+      });
+      await delay(5000, signal);
+    }
 
     switch (scenario.kind) {
       case "authFailed":
@@ -495,6 +569,12 @@ export function createMockBackend(): Backend {
   });
 
   const forwards = createForwards({
+    onSettings: (next) => {
+      if (next.tailscale === tailscaleOn) return;
+      tailscaleOn = next.tailscale;
+      relist();
+      emit({ type: "hostsChanged" });
+    },
     host: (id) => hosts.find((h) => h.id === id),
     isConnected: (id) => sessions.get(id)?.connected === true,
     connect: (id) => connecting.get(id) ?? connect(id),
@@ -507,17 +587,25 @@ export function createMockBackend(): Backend {
     uuid,
   });
 
-  async function connect(id: HostId): Promise<void> {
+  async function connect(id: HostId, asUser?: string): Promise<void> {
     const host = find(id);
     const existing = sessions.get(id);
     if (existing?.connected) return;
+    const user = asUser ?? host.user ?? (host.source === "tailscale" ? null : "rodrigo");
+    if (!user) throw err("userRequired", `no user to log in as on ${host.name}`);
     if (existing) existing.abort.abort();
     const session = { abort: new AbortController(), connected: false };
     sessions.set(id, session);
     const attempt = (async () => {
       try {
-        const capabilities = await runConnect(host, session.abort.signal);
+        const capabilities = await runConnect(host, user, session.abort.signal);
         session.connected = true;
+        if (host.source === "tailscale" && host.user !== user) {
+          // Remembered for next time, like the real backend does.
+          tailnet = tailnet.map((h) => (h.id === id ? { ...h, user } : h));
+          relist();
+          emit({ type: "hostsChanged" });
+        }
         emit({ type: "connection", hostId: id, state: "connected", capabilities });
         forwards.hostConnected(id);
         edits.hostConnected(id);
@@ -583,8 +671,10 @@ export function createMockBackend(): Backend {
     },
     async createHost(draft) {
       validate(draft, null);
-      const host = fromDraft(`app:${uuid()}`, draft);
-      hosts = [...hosts, host];
+      const host = fromDraft(`cfg:${draft.name.trim()}`, draft);
+      delete renamed[host.id];
+      configHosts = [...configHosts, host];
+      relist();
       emit({ type: "hostsChanged" });
       return structuredClone(host);
     },
@@ -593,10 +683,27 @@ export function createMockBackend(): Backend {
       if (existing.source !== "app")
         throw err("readOnlyHost", `${existing.name} is defined in ~/.ssh/config and is read-only`);
       validate(draft, id);
-      const host = fromDraft(id, draft);
-      hosts = hosts.map((h) => (h.id === id ? host : h));
+      const host = fromDraft(`cfg:${draft.name.trim()}`, draft);
+      if (host.id !== id) {
+        if (sessions.has(id)) throw err("other", "Disconnect from this host before renaming it");
+        for (const [from, to] of Object.entries(renamed)) if (to === id) renamed[from] = host.id;
+        renamed[id] = host.id;
+        delete renamed[host.id];
+      }
+      configHosts = configHosts.map((h) => (h.id === id ? host : h));
+      relist();
       emit({ type: "hostsChanged" });
       return structuredClone(host);
+    },
+    async hostRenames() {
+      return { ...renamed };
+    },
+    async sshSharing() {
+      return { ...sharing };
+    },
+    async setSshSharing(shared) {
+      sharing = { ...sharing, shared };
+      return { ...sharing };
     },
     async deleteHost(id) {
       const existing = find(id);
@@ -607,10 +714,11 @@ export function createMockBackend(): Backend {
       files.hostDisconnected(id);
       terminals.hostDisconnected(id, "host was deleted");
       forwards.hostDeleted(id);
-      hosts = hosts.filter((h) => h.id !== id);
+      configHosts = configHosts.filter((h) => h.id !== id);
+      relist();
       emit({ type: "hostsChanged" });
     },
-    connect,
+    connect: (id, user) => connecting.get(id) ?? connect(id, user),
     async disconnect(id) {
       const session = sessions.get(id);
       if (!session) return;

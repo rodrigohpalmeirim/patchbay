@@ -1,10 +1,13 @@
 import type { CommandError, ConnectionState, HostId, RemoteCapabilities } from "../types";
-import { toCommandError } from "../util/errors";
+import { sentence, toCommandError } from "../util/errors";
+import { firstUrl } from "../util/format";
+import { openInBrowser } from "../util/links";
 import { call } from "./backend";
 import { hosts } from "./hosts.svelte";
 import { prompts } from "./prompts.svelte";
 import { tabs } from "./tabs.svelte";
 import { toasts } from "./toasts.svelte";
+import { ui } from "./ui.svelte";
 
 export type Phase =
   | "idle"
@@ -32,6 +35,8 @@ export interface Conn {
   lostReason: string | null;
   attempt: number;
   connectedAt: number | null;
+  /** Message the server showed while logging in (e.g. a link to approve the login). */
+  banner: string | null;
 }
 
 const IDLE: Conn = {
@@ -44,6 +49,7 @@ const IDLE: Conn = {
   lostReason: null,
   attempt: 0,
   connectedAt: null,
+  banner: null,
 };
 
 export function statusOf(phase: Phase): Status {
@@ -70,6 +76,8 @@ class Connections {
   map = $state<Record<HostId, Conn>>({});
   /** Increments per connect() call so stale results are ignored. */
   #seq = new Map<HostId, number>();
+  /** Toasts showing a login banner with a link, by host. */
+  #bannerToasts = new Map<HostId, number>();
 
   get(id: HostId): Conn {
     return this.map[id] ?? IDLE;
@@ -89,7 +97,8 @@ class Connections {
     return this.map[id];
   }
 
-  async connect(id: HostId) {
+  /** `user` logs in as someone else than configured (like `ssh -l`). */
+  async connect(id: HostId, { user }: { user?: string } = {}) {
     const c = this.#ensure(id);
     if (c.phase === "connected" || c.phase === "connecting" || c.phase === "authenticating") return;
     const seq = (this.#seq.get(id) ?? 0) + 1;
@@ -101,25 +110,58 @@ class Connections {
       stage: "connecting",
     } satisfies Conn);
     try {
-      await call((b) => b.connect(id), { toast: false });
+      await call((b) => b.connect(id, user), { toast: false });
     } catch (e) {
       if (this.#seq.get(id) !== seq) return;
       const error = toCommandError(e);
       const cur = this.#ensure(id);
+      const host = hosts.get(id);
       if (error.kind === "cancelled") {
         Object.assign(cur, { ...IDLE, hopsSeen: [] });
+      } else if (error.kind === "userRequired") {
+        // Tailscale device nobody has logged in to yet: ask whom to log in as.
+        Object.assign(cur, { ...IDLE, hopsSeen: [] });
+        ui.connectAs = { hostId: id, reason: "required" };
       } else {
         cur.phase = "error";
         cur.error = error;
         cur.capabilities = null;
         // Overview tab shows errors inline; toast only when it's not visible.
-        if (!tabs.isHostVisible(id)) {
-          const name = hosts.get(id)?.name ?? id;
-          toasts.error(error, `Couldn't connect to ${name}`);
+        if (error.kind === "authFailed" && host?.source === "tailscale") {
+          // Maybe the wrong user: offer to try another one.
+          ui.connectAs = {
+            hostId: id,
+            reason: "failed",
+            error: sentence(error.message),
+            user: user ?? host.user ?? undefined,
+          };
+        } else if (!tabs.isHostVisible(id)) {
+          toasts.error(error, `Couldn't connect to ${host?.name ?? id}`);
         }
       }
       prompts.dropForHost(id);
     }
+  }
+
+  /** Shows a login banner. Links in it (e.g. Tailscale SSH asking to approve the login) get a toast. */
+  banner(id: HostId, message: string) {
+    const c = this.#ensure(id);
+    c.banner = c.banner ? `${c.banner}\n${message}` : message;
+    const url = firstUrl(message);
+    if (!url) return;
+    this.#dismissBanner(id);
+    const name = hosts.get(id)?.name ?? id;
+    const toast = toasts.show("info", `${name} needs your approval`, message, {
+      sticky: true,
+      action: { label: "Open link", run: () => void openInBrowser(url) },
+    });
+    this.#bannerToasts.set(id, toast);
+  }
+
+  #dismissBanner(id: HostId) {
+    const toast = this.#bannerToasts.get(id);
+    if (toast !== undefined) toasts.dismiss(toast);
+    this.#bannerToasts.delete(id);
   }
 
   async disconnect(id: HostId) {
@@ -165,6 +207,8 @@ class Connections {
         c.stage = "authenticating";
         break;
       case "connected":
+        this.#dismissBanner(id);
+        c.banner = null;
         c.phase = "connected";
         c.stage = "connected";
         c.hop = null;
@@ -179,6 +223,7 @@ class Connections {
         break;
       case "disconnected": {
         prompts.dropForHost(id);
+        this.#dismissBanner(id);
         if (c.phase === "error" || c.phase === "disconnecting") break;
         if (c.phase === "connecting" || c.phase === "authenticating") {
           if (ev.reason) {

@@ -10,6 +10,7 @@
 //! An empty name is replaced by a generated one describing the forward,
 //! e.g. `L 8080 → localhost:80`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -138,6 +139,25 @@ impl ForwardStore {
         let mut rules = self.rules.clone();
         rules.remove(idx);
         self.commit(rules)
+    }
+
+    /// Points rules at the new ids of renamed hosts (old id -> new id).
+    /// Returns whether any rule changed.
+    pub fn rename_hosts(&mut self, renamed: &BTreeMap<HostId, HostId>) -> Result<bool> {
+        let mut rules = self.rules.clone();
+        let mut changed = false;
+        for r in &mut rules {
+            for id in std::iter::once(&mut r.host_id).chain(r.via_host_id.as_mut()) {
+                if let Some(new) = renamed.get(id.as_str()) {
+                    id.clone_from(new);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.commit(rules)?;
+        }
+        Ok(changed)
     }
 
     fn index(&self, id: &str) -> Result<usize> {
@@ -398,6 +418,31 @@ mod tests {
 
     fn err(d: PortForwardDraft) -> String {
         validate(d, known).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn renamed_hosts_are_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forwards.json");
+        let mut store = ForwardStore::load(path.clone()).unwrap();
+        let rule = validate(
+            PortForwardDraft {
+                via_host_id: Some("app:b".into()),
+                ..draft(PortForwardKind::Remote)
+            },
+            known,
+        )
+        .unwrap();
+        let rule = store.create(rule).unwrap();
+        let renamed = BTreeMap::from([
+            ("app:b".to_owned(), "cfg:b".to_owned()),
+            ("cfg:a".to_owned(), "cfg:c".to_owned()),
+        ]);
+        assert!(store.rename_hosts(&renamed).unwrap());
+        assert!(!store.rename_hosts(&renamed).unwrap());
+        let again = ForwardStore::load(path).unwrap().get(&rule.id).unwrap();
+        assert_eq!(again.host_id, "cfg:c");
+        assert_eq!(again.via_host_id.as_deref(), Some("cfg:b"));
     }
 
     #[test]

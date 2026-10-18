@@ -23,7 +23,13 @@
   <div class="item">
     <dt>User</dt>
     <dd class:none={!host.user}>
-      {#if host.user}<span class="mono selectable">{host.user}</span>{:else}Default (local user){/if}
+      {#if host.user}
+        <span class="mono selectable">{host.user}</span>
+      {:else if host.tailscale}
+        Asked when you connect
+      {:else}
+        Default (local user)
+      {/if}
     </dd>
   </div>
   <div class="item">
@@ -60,6 +66,21 @@
       {/if}
     </dd>
   </div>
+  {#if host.tailscale}
+    {@const ts = host.tailscale}
+    <div class="item">
+      <dt>Tailscale IPs</dt>
+      <dd class="mono selectable">{ts.ips.join(", ")}</dd>
+    </div>
+    <div class="item">
+      <dt>Owner</dt>
+      <dd class:none={!ts.owner}>{ts.owner ?? "Tagged device"}</dd>
+    </div>
+    <div class="item">
+      <dt>Tailscale SSH</dt>
+      <dd class:none={!ts.ssh}>{ts.ssh ? "On — host keys come from Tailscale" : "Off"}</dd>
+    </div>
+  {/if}
   {#if host.source === "app"}
     <div class="item">
       <dt>Group</dt>

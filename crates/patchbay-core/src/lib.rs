@@ -23,6 +23,7 @@ pub mod session;
 pub mod settings;
 pub mod snippets;
 pub mod ssh_config;
+pub mod tailscale;
 pub mod terminal;
 pub mod transfer;
 

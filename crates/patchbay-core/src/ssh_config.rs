@@ -383,6 +383,10 @@ pub struct SshConfig {
     items: Vec<Item>,
     conditions: Vec<Condition>,
     host_aliases: Vec<String>,
+    /// File each of `host_aliases` was first seen in.
+    alias_files: Vec<PathBuf>,
+    /// Every file read (the main file and all includes), in reading order.
+    files: Vec<PathBuf>,
     warnings: Vec<String>,
 }
 
@@ -394,6 +398,8 @@ impl SshConfig {
             items: Vec::new(),
             conditions: Vec::new(),
             host_aliases: Vec::new(),
+            alias_files: Vec::new(),
+            files: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -424,23 +430,50 @@ impl SshConfig {
         }
     }
 
+    /// Like [`load_with_env`](Self::load_with_env), with `prelude` read
+    /// first, as if `Include <prelude>` were the first line of `path`.
+    pub fn load_with_prelude(path: &Path, env: LocalEnv, prelude: &Path) -> Result<Self> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(source) => {
+                return Err(Error::ReadFile {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        };
+        Ok(Self::parse_with(&text, path, env, Some(prelude)))
+    }
+
     /// Parse config text. `path` is used for messages only; `Include`s are
     /// resolved relative to `~/.ssh` as OpenSSH does for user configs.
     pub fn parse(text: &str, path: &Path, env: LocalEnv) -> Self {
+        Self::parse_with(text, path, env, None)
+    }
+
+    fn parse_with(text: &str, path: &Path, env: LocalEnv, prelude: Option<&Path>) -> Self {
         let mut parser = Parser {
             env: &env,
             items: Vec::new(),
             conditions: Vec::new(),
             host_aliases: Vec::new(),
+            alias_files: Vec::new(),
             seen_aliases: HashSet::new(),
+            files: vec![path.to_owned()],
             warnings: Vec::new(),
             ignore_unknown: Vec::new(),
         };
+        if let Some(prelude) = prelude {
+            parser.read_file(prelude, path, 1, &[], 1);
+        }
         parser.parse_text(text, path, &[], 0);
         let Parser {
             items,
             conditions,
             host_aliases,
+            alias_files,
+            files,
             warnings,
             ..
         } = parser;
@@ -449,8 +482,26 @@ impl SshConfig {
             items,
             conditions,
             host_aliases,
+            alias_files,
+            files,
             warnings,
         }
+    }
+
+    /// Whether `file` was read as part of this config.
+    pub fn includes(&self, file: &Path) -> bool {
+        let canonical = fs::canonicalize(file).ok();
+        self.files
+            .iter()
+            .any(|f| f == file || (canonical.is_some() && fs::canonicalize(f).ok() == canonical))
+    }
+
+    /// The file the `Host` line that introduced `alias` is in.
+    pub fn alias_file(&self, alias: &str) -> Option<&Path> {
+        self.host_aliases
+            .iter()
+            .position(|a| a.eq_ignore_ascii_case(alias))
+            .map(|i| self.alias_files[i].as_path())
     }
 
     pub fn env(&self) -> &LocalEnv {
@@ -553,7 +604,9 @@ struct Parser<'e> {
     items: Vec<Item>,
     conditions: Vec<Condition>,
     host_aliases: Vec<String>,
+    alias_files: Vec<PathBuf>,
     seen_aliases: HashSet<String>,
+    files: Vec<PathBuf>,
     warnings: Vec<String>,
     ignore_unknown: Vec<String>,
 }
@@ -600,6 +653,7 @@ impl Parser<'_> {
                             && self.seen_aliases.insert(a.to_lowercase())
                         {
                             self.host_aliases.push(a.clone());
+                            self.alias_files.push(file.to_owned());
                         }
                     }
                     let patterns = args.iter().map(|a| Pattern::parse(a)).collect();
@@ -735,15 +789,30 @@ impl Parser<'_> {
             self.env.ssh_dir().join(path)
         };
         for target in expand_glob(&path) {
-            match fs::read_to_string(&target) {
-                Ok(text) => self.parse_text(&text, &target, conds, depth + 1),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => self.warn(
-                    file,
-                    line,
-                    format!("cannot read included file {}: {e}", target.display()),
-                ),
+            self.read_file(&target, file, line, conds, depth + 1);
+        }
+    }
+
+    /// Parse the included file `target` (a missing one is skipped silently).
+    fn read_file(
+        &mut self,
+        target: &Path,
+        file: &Path,
+        line: usize,
+        conds: &[usize],
+        depth: usize,
+    ) {
+        match fs::read_to_string(target) {
+            Ok(text) => {
+                self.files.push(target.to_owned());
+                self.parse_text(&text, target, conds, depth);
             }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => self.warn(
+                file,
+                line,
+                format!("cannot read included file {}: {e}", target.display()),
+            ),
         }
     }
 }
@@ -1025,7 +1094,7 @@ impl<'a> Builder<'a> {
 
 /// Split a config line into keyword and the unparsed rest, handling
 /// `Key value`, `Key=value` and `Key = value`. `None` for blank/comment lines.
-fn split_keyword(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_keyword(line: &str) -> Option<(&str, &str)> {
     let line = line.trim_start();
     if line.is_empty() || line.starts_with('#') {
         return None;
@@ -1043,7 +1112,7 @@ fn split_keyword(line: &str) -> Option<(&str, &str)> {
 /// OpenSSH `argv_split`: whitespace-separated words, `'`/`"` quoting (also
 /// mid-word), backslash escaping only of quotes, backslash and (unquoted)
 /// space, and `#` at the start of a word ending the line.
-fn split_args(s: &str) -> std::result::Result<Vec<String>, String> {
+pub(crate) fn split_args(s: &str) -> std::result::Result<Vec<String>, String> {
     let chars: Vec<char> = s.chars().collect();
     let mut args = Vec::new();
     let mut i = 0;

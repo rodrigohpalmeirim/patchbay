@@ -20,6 +20,8 @@ use crate::state::AppState;
 const EXIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often old drag-out copies are deleted.
 const DRAGOUT_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How often the tailnet's devices (and their online state) are re-read.
+const TAILNET_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 pub fn run() {
     tracing_subscriber::fmt()
@@ -117,6 +119,14 @@ pub fn run() {
                 }
             });
 
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    handle.state::<AppState>().refresh_tailnet().await;
+                    tokio::time::sleep(TAILNET_REFRESH_INTERVAL).await;
+                }
+            });
+
             tray::init(app.handle());
             window::init(app.handle());
             Ok(())
@@ -169,6 +179,9 @@ pub fn run() {
             commands::create_host,
             commands::update_host,
             commands::delete_host,
+            commands::host_renames,
+            commands::ssh_sharing,
+            commands::set_ssh_sharing,
             commands::list_connections,
             commands::connect,
             commands::disconnect,

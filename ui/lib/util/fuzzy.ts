@@ -66,6 +66,7 @@ export function matchHost(host: Host, query: string): Match | null {
     [host.user ?? "", 0.6],
     [host.group ?? "", 0.5],
     ...host.tags.map((t): [string, number] => [t, 0.7]),
+    ...(host.tailscale?.ips ?? []).map((ip): [string, number] => [ip, 0.8]),
   ];
 
   let total = 0;

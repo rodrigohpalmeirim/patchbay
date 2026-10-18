@@ -8,9 +8,11 @@ import FolderOpen from "@lucide/svelte/icons/folder-open";
 import PanelTop from "@lucide/svelte/icons/panel-top";
 import Pencil from "@lucide/svelte/icons/pencil";
 import Plug from "@lucide/svelte/icons/plug";
+import Save from "@lucide/svelte/icons/save";
 import SquareTerminal from "@lucide/svelte/icons/square-terminal";
 import Trash2 from "@lucide/svelte/icons/trash-2";
 import Unplug from "@lucide/svelte/icons/unplug";
+import UserRound from "@lucide/svelte/icons/user-round";
 import X from "@lucide/svelte/icons/x";
 import { openFiles } from "./files/ops";
 import { openTerminal, terminalUnavailable } from "./terminal/ops";
@@ -58,17 +60,25 @@ export function editHost(host: Host) {
   ui.editor = host.source === "app" ? { mode: "edit", hostId: host.id } : { mode: "view", hostId: host.id };
 }
 
-/** Prefills the editor with a copy of `host` (used for read-only ssh_config hosts). */
+/** Asks which user to log in as, then connects (Tailscale devices). */
+export function connectHostAs(host: Host) {
+  tabs.openHost(host.id);
+  ui.connectAs = { hostId: host.id, reason: "choose" };
+}
+
+/** Prefills the editor with a copy of `host` (read-only hosts and Tailscale devices). */
 export function duplicateHost(host: Host) {
-  let name = `${host.name}-copy`;
-  for (let i = 2; hosts.findByName(name); i++) name = `${host.name}-copy-${i}`;
+  const base = host.source === "tailscale" ? host.name : `${host.name}-copy`;
+  let name = base;
+  for (let i = 2; hosts.findByName(name); i++) name = `${base}-${i}`;
   newHost({
     name,
     hostname: host.hostname,
     port: host.port === 22 ? null : host.port,
     user: host.user,
-    identityFiles: [...host.identityFiles],
-    proxyJump: host.proxyJump,
+    // A device's keys and jump hosts come from ssh_config anyway.
+    identityFiles: host.source === "tailscale" ? [] : [...host.identityFiles],
+    proxyJump: host.source === "tailscale" ? null : host.proxyJump,
     group: host.group,
     tags: [...host.tags],
   });
@@ -77,7 +87,7 @@ export function duplicateHost(host: Host) {
 export async function deleteHost(host: Host) {
   const ok = await ui.confirm({
     title: `Delete ${host.name}?`,
-    message: "The host is removed from Patchbay. Keys, known_hosts entries and saved passwords are kept.",
+    message: "The host is removed from ~/.ssh/patchbay.conf. Keys, known_hosts entries and saved passwords are kept.",
     confirmLabel: "Delete host",
     danger: true,
   });
@@ -90,10 +100,29 @@ export async function deleteHost(host: Host) {
   }
 }
 
-export async function copySshCommand(host: Host) {
+const SHARE_OFFERED_KEY = "patchbay.sshShareOffered";
+
+/**
+ * Offers (once) to add `Include patchbay.conf` to ~/.ssh/config when there
+ * are Patchbay hosts ssh can't see yet.
+ */
+export function maybeOfferSshSharing() {
+  if (!hosts.sharing || hosts.sharing.shared) return;
+  if (!hosts.list.some((h) => h.source === "app")) return;
   try {
-    await writeClipboard(sshCommand(host));
-    toasts.success("Copied SSH command", sshCommand(host));
+    if (localStorage.getItem(SHARE_OFFERED_KEY)) return;
+    localStorage.setItem(SHARE_OFFERED_KEY, "1");
+  } catch {
+    return;
+  }
+  ui.shareOffer = true;
+}
+
+export async function copySshCommand(host: Host) {
+  const command = sshCommand(host, hosts.sharing?.shared ?? false);
+  try {
+    await writeClipboard(command);
+    toasts.success("Copied SSH command", command);
   } catch {
     toasts.show("error", "Couldn't access the clipboard");
   }
@@ -121,7 +150,13 @@ export function hostMenuItems(host: Host, { includeOpen = true } = {}): MenuItem
   });
   items.push({ label: "Port forwards", icon: Cable, onSelect: () => tabs.openForwards(host.id) });
   items.push({ separator: true });
-  if (host.source === "app") {
+  if (host.source === "tailscale") {
+    if (phase === "idle" || phase === "error") {
+      items.push({ label: "Connect as…", icon: UserRound, onSelect: () => connectHostAs(host) });
+    }
+    items.push({ label: "View details…", icon: FileText, onSelect: () => editHost(host) });
+    items.push({ label: "Save as host…", icon: Save, onSelect: () => duplicateHost(host) });
+  } else if (host.source === "app") {
     items.push({ label: "Edit…", icon: Pencil, onSelect: () => editHost(host) });
     items.push({ label: "Duplicate…", icon: CopyPlus, onSelect: () => duplicateHost(host) });
   } else {

@@ -9,8 +9,10 @@
   import { ui } from "../stores/ui.svelte";
   import { modKey } from "../util/platform";
 
-  const cfgCount = $derived(hosts.list.filter((h) => h.source === "sshConfig").length);
-  const appCount = $derived(hosts.list.length - cfgCount);
+  const count = (source: string) => hosts.list.filter((h) => h.source === source).length;
+  const cfgCount = $derived(count("sshConfig"));
+  const appCount = $derived(count("app"));
+  const tailnetCount = $derived(count("tailscale"));
 </script>
 
 <div class="welcome">
@@ -24,7 +26,8 @@
         Pick a host from the sidebar to see its details and connect.
         {#if hosts.loaded}
           <span class="stats">
-            {cfgCount} from <code>~/.ssh/config</code> · {appCount} saved in Patchbay
+            {cfgCount} from <code>~/.ssh/config</code> · {appCount} saved in Patchbay{#if tailnetCount}
+              · {tailnetCount} on your tailnet{/if}
           </span>
         {/if}
       </p>

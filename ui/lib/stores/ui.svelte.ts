@@ -51,6 +51,16 @@ export type ForwardEditorState =
   | { mode: "create"; initial?: Partial<PortForwardDraft> }
   | { mode: "edit"; id: string };
 
+/** Asking which user to log in as before connecting. */
+export interface ConnectAsState {
+  hostId: HostId;
+  /** required: no user is known yet; failed: logging in failed; choose: "Connect as…". */
+  reason: "required" | "failed" | "choose";
+  error?: string;
+  /** Prefill. */
+  user?: string;
+}
+
 export interface PermissionsState {
   hostId: HostId | null;
   entries: FileEntry[];
@@ -67,6 +77,9 @@ class Ui {
   permissions = $state<PermissionsState | null>(null);
   snippets = $state<SnippetsDialogState | null>(null);
   forwardEditor = $state<ForwardEditorState | null>(null);
+  connectAs = $state<ConnectAsState | null>(null);
+  /** Offer to add `Include patchbay.conf` to ~/.ssh/config. */
+  shareOffer = $state(false);
   /** Registered by the sidebar so global shortcuts can focus the search box. */
   focusSearch: () => void = () => {};
 

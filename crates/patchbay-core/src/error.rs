@@ -24,7 +24,7 @@ pub enum Error {
     #[error("unknown host: {0}")]
     UnknownHost(String),
 
-    #[error("host is read-only (defined in ~/.ssh/config): {0}")]
+    #[error("host is read-only (not saved in Patchbay): {0}")]
     ReadOnlyHost(String),
 
     #[error("SSH error: {0}")]
@@ -41,6 +41,9 @@ pub enum Error {
 
     #[error("authentication failed for {user}@{host}")]
     AuthFailed { user: String, host: String },
+
+    #[error("no user to log in as on {0}")]
+    UserRequired(String),
 
     #[error("cancelled by user")]
     Cancelled,

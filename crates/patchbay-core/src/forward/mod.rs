@@ -50,7 +50,7 @@ pub mod rules;
 mod socks;
 mod status;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -201,6 +201,14 @@ impl ForwardManager {
         self.inner.store.lock().await.delete(id)?;
         self.inner.runs().remove(id);
         self.inner.emit_rules_changed();
+        Ok(())
+    }
+
+    /// Points app rules at the new ids of renamed hosts (old id -> new id).
+    pub async fn rename_hosts(&self, renamed: &BTreeMap<HostId, HostId>) -> Result<()> {
+        if self.inner.store.lock().await.rename_hosts(renamed)? {
+            self.inner.emit_rules_changed();
+        }
         Ok(())
     }
 

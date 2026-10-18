@@ -4,21 +4,33 @@
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import Copy from "@lucide/svelte/icons/copy";
   import Ellipsis from "@lucide/svelte/icons/ellipsis";
+  import ExternalLink from "@lucide/svelte/icons/external-link";
   import FileText from "@lucide/svelte/icons/file-text";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import House from "@lucide/svelte/icons/house";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import MessageSquare from "@lucide/svelte/icons/message-square";
+  import Network from "@lucide/svelte/icons/network";
   import Pencil from "@lucide/svelte/icons/pencil";
   import Plug from "@lucide/svelte/icons/plug";
   import Plus from "@lucide/svelte/icons/plus";
   import RotateCw from "@lucide/svelte/icons/rotate-cw";
+  import Save from "@lucide/svelte/icons/save";
   import Server from "@lucide/svelte/icons/server";
   import SquareTerminal from "@lucide/svelte/icons/square-terminal";
   import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
   import Unplug from "@lucide/svelte/icons/unplug";
   import X from "@lucide/svelte/icons/x";
   import ArrowRight from "@lucide/svelte/icons/arrow-right";
-  import { connectHost, copySshCommand, disconnectHost, editHost, hostMenuItems } from "../actions";
+  import {
+    connectHost,
+    connectHostAs,
+    copySshCommand,
+    disconnectHost,
+    duplicateHost,
+    editHost,
+    hostMenuItems,
+  } from "../actions";
   import { openFiles } from "../files/ops";
   import ForwardRow from "../forwards/ForwardRow.svelte";
   import { newForward } from "../forwards/ops";
@@ -36,7 +48,8 @@
   import { ui } from "../stores/ui.svelte";
   import type { Host } from "../types";
   import { errorTitle, sentence } from "../util/errors";
-  import { address, hopLabel, jumpHops, osLabel } from "../util/format";
+  import { address, firstUrl, hopLabel, jumpHops, osLabel, tailscaleOs } from "../util/format";
+  import { openInBrowser } from "../util/links";
 
   let { host }: { tab: HostTab; host: Host; active: boolean } = $props();
 
@@ -103,6 +116,8 @@
       <div class="avatar" class:on={phase === "connected"}>
         {#if caps && caps.os !== "unknown"}
           <OsIcon os={caps.os} size={22} />
+        {:else if host.tailscale && tailscaleOs(host.tailscale.os) !== "unknown"}
+          <OsIcon os={tailscaleOs(host.tailscale.os)} size={22} />
         {:else}
           <Server size={22} />
         {/if}
@@ -115,8 +130,12 @@
         <div class="address">
           {#if host.source === "sshConfig"}
             <span class="badge" title="Defined in ~/.ssh/config (read-only)"><FileText size={11} /> SSH config</span>
+          {:else if host.tailscale}
+            <span class="badge" class:success={host.tailscale.online} title="On your tailnet">
+              <Network size={11} /> Tailscale · {host.tailscale.online ? "online" : "offline"}
+            </span>
           {:else}
-            <span class="badge accent" title="Saved in Patchbay">Patchbay</span>
+            <span class="badge accent" title="Saved in ~/.ssh/patchbay.conf">Patchbay</span>
           {/if}
           <span class="mono selectable">{address(host)}</span>
           <button class="icon-btn sm" title="Copy SSH command" aria-label="Copy SSH command" onclick={() => copySshCommand(host)}>
@@ -210,6 +229,21 @@
             {/each}
           </ol>
         {/if}
+        {#if busy && conn.banner}
+          {@const url = firstUrl(conn.banner)}
+          <div class="callout info" role="status">
+            <MessageSquare size={16} />
+            <div class="callout-body">
+              <div class="callout-title">Message from {host.name}</div>
+              <div class="callout-text selectable banner">{conn.banner}</div>
+              {#if url}
+                <div class="callout-actions">
+                  <button class="btn btn-sm btn-primary" onclick={() => void openInBrowser(url)}><ExternalLink size={13} /> Open link</button>
+                </div>
+              {/if}
+            </div>
+          </div>
+        {/if}
         {#if phase === "error" && conn.error}
           <div class="callout danger" role="alert">
             <CircleAlert size={16} />
@@ -217,6 +251,9 @@
               <div class="callout-title">{errorTitle(conn.error.kind)}</div>
               <div class="callout-text selectable">{sentence(conn.error.message)}</div>
               <div class="callout-actions">
+                {#if host.source === "tailscale"}
+                  <button class="btn btn-sm" onclick={() => connectHostAs(host)}>Connect as…</button>
+                {/if}
                 <button class="btn btn-sm" onclick={() => editHost(host)}>
                   {host.source === "app" ? "Edit host…" : "View settings…"}
                 </button>
@@ -335,6 +372,8 @@
         <h2 id="details-{host.id}" class="block-title">Details</h2>
         {#if host.source === "app"}
           <button class="btn btn-ghost btn-sm" onclick={() => editHost(host)}><Pencil size={13} /> Edit</button>
+        {:else if host.source === "tailscale"}
+          <button class="btn btn-ghost btn-sm" onclick={() => duplicateHost(host)}><Save size={13} /> Save as host</button>
         {:else}
           <span class="muted small">From <code>~/.ssh/config</code> · read-only</span>
         {/if}
@@ -641,6 +680,16 @@
   .callout.warning {
     background: var(--warning-soft);
     color: var(--warning-text);
+  }
+  .callout.info {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .callout + .callout {
+    margin-top: 10px;
+  }
+  .banner {
+    white-space: pre-wrap;
   }
   .callout-body {
     flex: 1;

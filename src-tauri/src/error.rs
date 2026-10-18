@@ -17,6 +17,7 @@ impl From<patchbay_core::Error> for CommandError {
             E::ReadOnlyHost(_) => "readOnlyHost",
             E::HostKeyRejected { .. } => "hostKeyRejected",
             E::AuthFailed { .. } => "authFailed",
+            E::UserRequired(_) => "userRequired",
             E::Cancelled => "cancelled",
             E::NotConnected(_) => "notConnected",
             E::Timeout(_) => "timeout",

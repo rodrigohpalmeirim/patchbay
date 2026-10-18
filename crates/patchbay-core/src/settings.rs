@@ -119,6 +119,7 @@ mod tests {
                 launch_at_login: true,
                 start_minimized: false,
                 max_concurrent_transfers: 0,
+                tailscale: false,
             })
             .unwrap();
         assert_eq!(saved.max_concurrent_transfers, 1);

@@ -60,7 +60,7 @@ pub use handler::ClientHandler;
 pub use remote_forward::{ForwardedTcpip, RemoteListener};
 
 use auth::Authenticator;
-use handler::{CloseSignal, HostKeyPolicy};
+use handler::{Banner, CloseSignal, HostKeyPolicy};
 use prompt::{PromptGate, Prompter};
 use remote_forward::ForwardRoutes;
 
@@ -438,6 +438,16 @@ impl Inner {
         gate: Option<Arc<PromptGate>>,
     ) -> Result<Arc<Connection>> {
         let prompter = Prompter::new(self.prompts.clone(), target.host_id.clone(), gate);
+        let show_banner: Arc<dyn Fn(&str) + Send + Sync> = {
+            let events = self.events.clone();
+            let host_id = key.to_owned();
+            Arc::new(move |message: &str| {
+                let _ = events.send(CoreEvent::AuthBanner {
+                    host_id: host_id.clone(),
+                    message: message.to_owned(),
+                });
+            })
+        };
         let mut hops: Vec<SshHandle> = Vec::with_capacity(target.jumps.len());
         for jump in &target.jumps {
             if !jump.jumps.is_empty() {
@@ -450,8 +460,9 @@ impl Inner {
                     hop: Some(jump.label.clone()),
                 },
             );
-            let (mut handle, _, _) = open_hop(jump, hops.last(), &prompter).await?;
-            Authenticator::new(&mut handle, jump, &prompter, connect_timeout(jump))
+            let banner = Arc::new(Banner::new(show_banner.clone()));
+            let (mut handle, _, _) = open_hop(jump, hops.last(), &prompter, &banner).await?;
+            Authenticator::new(&mut handle, jump, &prompter, connect_timeout(jump), banner)
                 .run()
                 .await?;
             tracing::debug!(hop = %jump.label, "jump host ready");
@@ -459,11 +470,19 @@ impl Inner {
         }
 
         self.set_state(id, key, ConnectionState::Connecting { hop: None });
-        let (mut handle, close, routes) = open_hop(&target, hops.last(), &prompter).await?;
+        let banner = Arc::new(Banner::new(show_banner));
+        let (mut handle, close, routes) =
+            open_hop(&target, hops.last(), &prompter, &banner).await?;
         self.set_state(id, key, ConnectionState::Authenticating);
-        Authenticator::new(&mut handle, &target, &prompter, connect_timeout(&target))
-            .run()
-            .await?;
+        Authenticator::new(
+            &mut handle,
+            &target,
+            &prompter,
+            connect_timeout(&target),
+            banner,
+        )
+        .run()
+        .await?;
         tracing::info!(host = %key, "authenticated");
         let conn = Connection::new(key.to_owned(), target, handle, hops, close, routes).await;
         Ok(Arc::new(conn))
@@ -629,6 +648,7 @@ async fn open_hop(
     target: &ConnectTarget,
     via: Option<&SshHandle>,
     prompter: &Prompter,
+    banner: &Arc<Banner>,
 ) -> Result<(SshHandle, Arc<CloseSignal>, Arc<ForwardRoutes>)> {
     let timeout = connect_timeout(target);
     let addr = format!("{}:{}", target.hostname, target.port);
@@ -643,10 +663,21 @@ async fn open_hop(
         known_hosts_files: target.known_hosts_files.clone(),
         host,
         port: target.port,
+        trusted: target
+            .trusted_host_keys
+            .iter()
+            .filter_map(|k| russh::keys::PublicKey::from_openssh(k).ok())
+            .collect(),
         prompter: prompter.clone(),
     };
     let routes = Arc::new(ForwardRoutes::default());
-    let handler = ClientHandler::new(policy, started_tx, close.clone(), routes.clone());
+    let handler = ClientHandler::new(
+        policy,
+        started_tx,
+        close.clone(),
+        routes.clone(),
+        banner.clone(),
+    );
     let timed_out = || Error::Timeout(format!("connecting to {addr}"));
 
     let handle = match via {

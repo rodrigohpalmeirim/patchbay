@@ -32,6 +32,11 @@
   const status = $derived(connections.status(host.id));
   const busy = $derived(status === "busy");
   const forwarding = $derived(forwards.activeFor(host.id).length);
+  const offline = $derived(!!host.tailscale && !host.tailscale.online);
+  /** Tailscale devices: the IP (the name already is the MagicDNS name). */
+  const addr = $derived(
+    host.tailscale ? `${host.user ? `${host.user}@` : ""}${host.tailscale.ips[0] ?? host.hostname}` : address(host),
+  );
 
   /** Splits the name into highlighted / plain runs for fuzzy matches. */
   const runs = $derived.by(() => {
@@ -66,7 +71,7 @@
   }
 </script>
 
-<li class="row" class:selected>
+<li class="row" class:selected class:offline>
   <button
     type="button"
     class="main"
@@ -85,7 +90,7 @@
       <span class="name">
         {#each runs as run, i (i)}{#if run.hit}<mark>{run.text}</mark>{:else}{run.text}{/if}{/each}
       </span>
-      <span class="addr">{address(host)}</span>
+      <span class="addr">{addr}{#if offline}{" · offline"}{/if}</span>
     </span>
     {#if forwarding > 0}
       <span class="fwd" title="{forwarding} port {forwarding === 1 ? 'forward' : 'forwards'} active">
@@ -130,6 +135,9 @@
     position: relative;
     list-style: none;
     margin: 0 8px;
+  }
+  .row.offline .text {
+    opacity: 0.55;
   }
   .main {
     display: flex;

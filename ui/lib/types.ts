@@ -1,7 +1,9 @@
 // Mirrors crates/patchbay-core/src/model.rs (serde camelCase). Keep in sync.
 
+/** `cfg:<alias>` for ssh_config hosts (including Patchbay's), `ts:<node id>` for Tailscale devices. */
 export type HostId = string;
-export type HostSource = "sshConfig" | "app";
+/** sshConfig: written by the user (read-only); app: saved in Patchbay (~/.ssh/patchbay.conf). */
+export type HostSource = "sshConfig" | "app" | "tailscale";
 
 export interface Host {
   id: HostId;
@@ -14,6 +16,28 @@ export interface Host {
   proxyJump: string | null;
   group: string | null;
   tags: string[];
+  /** Set for Tailscale devices. */
+  tailscale?: TailscaleInfo;
+}
+
+export interface TailscaleInfo {
+  online: boolean;
+  /** As reported by Tailscale: "linux", "windows", "macOS", ... */
+  os: string;
+  dnsName: string | null;
+  ips: string[];
+  /** The device runs Tailscale SSH. */
+  ssh: boolean;
+  /** Login name of the owner; null for tagged devices. */
+  owner: string | null;
+  /** Users to offer when asking whom to log in as, best guess first. */
+  userSuggestions: string[];
+}
+
+/** Whether ~/.ssh/config includes the file Patchbay hosts are saved in. */
+export interface SshSharing {
+  shared: boolean;
+  path: string;
 }
 
 export interface HostDraft {
@@ -115,6 +139,7 @@ export type EditConflictResolution = "overwrite" | "discardLocal" | "keepLocal";
 export type CoreEvent =
   | ({ type: "connection"; hostId: HostId } & ConnectionState)
   | { type: "hostsChanged" }
+  | { type: "authBanner"; hostId: HostId; message: string }
   | ({ type: "transfer" } & TransferInfo)
   | {
       type: "search";
@@ -261,6 +286,7 @@ export type ErrorKind =
   | "readOnlyHost"
   | "hostKeyRejected"
   | "authFailed"
+  | "userRequired"
   | "cancelled"
   | "notConnected"
   | "timeout"
@@ -377,4 +403,6 @@ export interface AppSettings {
   launchAtLogin: boolean;
   startMinimized: boolean;
   maxConcurrentTransfers: number;
+  /** List the devices of the user's tailnet. */
+  tailscale: boolean;
 }

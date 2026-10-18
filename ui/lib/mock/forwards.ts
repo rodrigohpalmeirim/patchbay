@@ -28,10 +28,10 @@ import type {
 const BASTION = "cfg:bastion";
 const DB = "cfg:db-internal";
 const BUILD_MAC = "cfg:build-mac";
-const PI = "app:6f1c2a90-raspberrypi";
-const PROD_WEB = "app:9a3d5e2f-prod-web-01";
-const STAGING = "app:47c8b1aa-staging-api";
-const WIN = "app:d2e9f310-win-buildbox";
+const PI = "cfg:raspberrypi";
+const PROD_WEB = "cfg:prod-web-01";
+const STAGING = "cfg:staging-api";
+const WIN = "cfg:win-buildbox";
 
 const rule = (r: Partial<PortForward> & Pick<PortForward, "id" | "name" | "kind" | "hostId" | "bindPort">): PortForward => ({
   source: "app",
@@ -139,9 +139,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   launchAtLogin: false,
   startMinimized: false,
   maxConcurrentTransfers: 3,
+  tailscale: true,
 };
 
 export interface ForwardsDeps {
+  /** Backend settings were saved. */
+  onSettings?(settings: AppSettings): void;
   host(id: HostId): Host | undefined;
   isConnected(id: HostId): boolean;
   /** The mock `connect` (emits connection events, may prompt). */
@@ -469,8 +472,10 @@ export function createForwards(deps: ForwardsDeps) {
         launchAtLogin: !!next.launchAtLogin,
         startMinimized: !!next.launchAtLogin && !!next.startMinimized,
         maxConcurrentTransfers: Number.isFinite(n) ? Math.min(8, Math.max(1, n)) : settings.maxConcurrentTransfers,
+        tailscale: next.tailscale !== false,
       };
       deps.emit({ type: "settingsChanged", ...settings });
+      deps.onSettings?.(settings);
       return { ...settings };
     },
   };

@@ -16,7 +16,7 @@ use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::{AgentAuthError, MethodKind, MethodSet};
 
 use super::agent;
-use super::handler::ClientHandler;
+use super::handler::{Banner, ClientHandler};
 use super::prompt::Prompter;
 use crate::model::{ConnectTarget, KbdPrompt, Prompt, PromptResponse};
 use crate::{Error, Result, secrets};
@@ -24,12 +24,17 @@ use crate::{Error, Result, secrets};
 const MAX_TRIES: usize = 3;
 /// Bound on multi-factor rounds (each needs a partial success to continue).
 const MAX_PASSES: usize = 4;
+/// How long to wait for an answer once the server has shown a banner: it may
+/// be waiting for the user to act on it (e.g. Tailscale SSH's "check" mode,
+/// which asks to approve the login in a browser).
+const BANNER_WAIT: Duration = Duration::from_secs(5 * 60);
 
 pub(crate) struct Authenticator<'a> {
     handle: &'a mut Handle<ClientHandler>,
     target: &'a ConnectTarget,
     prompter: &'a Prompter,
     timeout: Duration,
+    banner: Arc<Banner>,
     /// Methods the server still accepts.
     methods: MethodSet,
     /// Public keys already offered, so identity files the agent has already
@@ -59,12 +64,14 @@ impl<'a> Authenticator<'a> {
         target: &'a ConnectTarget,
         prompter: &'a Prompter,
         timeout: Duration,
+        banner: Arc<Banner>,
     ) -> Self {
         Self {
             handle,
             target,
             prompter,
             timeout,
+            banner,
             methods: MethodSet::empty(),
             offered: Vec::new(),
             rsa_hash: None,
@@ -79,6 +86,7 @@ impl<'a> Authenticator<'a> {
         let res = net(
             self.timeout,
             self.target,
+            &self.banner,
             self.handle.authenticate_none(user),
         )
         .await?;
@@ -211,14 +219,14 @@ impl<'a> Authenticator<'a> {
             let fut = self
                 .handle
                 .authenticate_publickey_with(user, key, hash, &mut agent);
-            let res = match tokio::time::timeout(self.timeout, fut).await {
-                Ok(Ok(res)) => res,
-                Ok(Err(AgentAuthError::Key(e))) => {
+            let res = match wait(self.timeout, &self.banner, fut).await {
+                Some(Ok(res)) => res,
+                Some(Err(AgentAuthError::Key(e))) => {
                     tracing::debug!("agent signing failed: {e}");
                     continue;
                 }
-                Ok(Err(AgentAuthError::Send(_))) => return Err(russh::Error::SendError.into()),
-                Err(_) => return Err(timeout_error(self.target)),
+                Some(Err(AgentAuthError::Send(_))) => return Err(russh::Error::SendError.into()),
+                None => return Err(timeout_error(self.target)),
             };
             match self.record(res) {
                 Step::Done => return Ok(true),
@@ -259,6 +267,7 @@ impl<'a> Authenticator<'a> {
             let res = net(
                 self.timeout,
                 self.target,
+                &self.banner,
                 self.handle.authenticate_publickey(user, key),
             )
             .await?;
@@ -343,6 +352,7 @@ impl<'a> Authenticator<'a> {
             let mut response = net(
                 self.timeout,
                 self.target,
+                &self.banner,
                 self.handle
                     .authenticate_keyboard_interactive_start(user, None),
             )
@@ -425,6 +435,7 @@ impl<'a> Authenticator<'a> {
                         response = net(
                             self.timeout,
                             self.target,
+                            &self.banner,
                             self.handle
                                 .authenticate_keyboard_interactive_respond(answers),
                         )
@@ -534,6 +545,7 @@ impl<'a> Authenticator<'a> {
         let res = net(
             self.timeout,
             self.target,
+            &self.banner,
             self.handle.authenticate_password(user, password),
         )
         .await?;
@@ -561,11 +573,32 @@ fn is_password_round(prompts: &[russh::client::Prompt]) -> bool {
 async fn net<T>(
     timeout: Duration,
     target: &ConnectTarget,
+    banner: &Banner,
     fut: impl Future<Output = Result<T, russh::Error>>,
 ) -> Result<T> {
-    match tokio::time::timeout(timeout, fut).await {
-        Ok(res) => Ok(res?),
-        Err(_) => Err(timeout_error(target)),
+    match wait(timeout, banner, fut).await {
+        Some(res) => Ok(res?),
+        None => Err(timeout_error(target)),
+    }
+}
+
+/// Waits for `fut` for `timeout`, or for [`BANNER_WAIT`] once the server
+/// has shown a banner. `None` if it took too long.
+async fn wait<F: Future>(timeout: Duration, banner: &Banner, fut: F) -> Option<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    let mut deadline = tokio::time::Instant::now() + timeout;
+    let mut extended = false;
+    loop {
+        tokio::select! {
+            out = &mut fut => return Some(out),
+            () = tokio::time::sleep_until(deadline) => {
+                if extended || !banner.seen() {
+                    return None;
+                }
+                extended = true;
+                deadline = tokio::time::Instant::now() + BANNER_WAIT;
+            }
+        }
     }
 }
 

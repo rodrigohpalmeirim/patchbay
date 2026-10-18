@@ -20,7 +20,8 @@
   import type { PortForward } from "../types";
   import { sentence } from "../util/errors";
   import { formatBytes, formatSpeed } from "../util/format";
-  import { browserUrl, copyAddress, describeRoute, editForward, KIND_FLAG, KIND_LABEL, machineName, openInBrowser, showForwardMenu } from "./ops";
+  import { browserUrl, copyAddress, describeRoute, editForward, KIND_FLAG, KIND_LABEL, machineName, showForwardMenu } from "./ops";
+  import { openInBrowser } from "../util/links";
 
   let {
     forward: f,

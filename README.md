@@ -15,9 +15,14 @@ things may still change. See [DESIGN.md](DESIGN.md) for the design decisions and
 
 ## Features
 
-- **Hosts**: reads `~/.ssh/config` (patterns, `Include`, `ProxyJump`, forwards, ...) plus
-  app-managed hosts with groups and tags; one shared connection per host with keepalive and
-  auto-reconnect.
+- **Hosts**: reads `~/.ssh/config` (patterns, `Include`, `ProxyJump`, forwards, ...). Hosts
+  you add in Patchbay are saved in `~/.ssh/patchbay.conf`, a plain ssh_config file that
+  `ssh` can use too (one `Include` line, added with your consent), with groups and tags.
+  One shared connection per host with keepalive and auto-reconnect.
+- **Tailscale**: devices on your tailnet are listed automatically (when Tailscale is
+  installed), with online state; Patchbay asks once which user to log in as and remembers
+  it. Tailscale SSH works, including "check" mode's approval link, and its advertised host
+  keys are trusted.
 - **Auth**: key files (+ passphrase), SSH agent (Unix socket, Windows OpenSSH, Pageant),
   password, keyboard-interactive / 2FA; secrets optionally stored in the OS keychain.
 - **Host keys**: shares `~/.ssh/known_hosts` (hashed entries supported), fingerprint prompt

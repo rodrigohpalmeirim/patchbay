@@ -236,6 +236,14 @@ class Tabs {
     for (const t of this.list.filter((t) => t.hostId === hostId)) this.close(t.id);
   }
 
+  /** Moves tabs of renamed hosts to the hosts' new ids. */
+  retarget(currentId: (id: HostId) => HostId | null) {
+    for (const t of this.list) {
+      const id = t.hostId === null ? null : currentId(t.hostId);
+      if (id && id !== t.hostId) t.hostId = id;
+    }
+  }
+
   /** Closes tabs whose host no longer exists (local tabs are kept). */
   prune(exists: (id: HostId) => boolean) {
     for (const t of this.list.filter((t) => t.hostId !== null && !exists(t.hostId))) this.close(t.id);

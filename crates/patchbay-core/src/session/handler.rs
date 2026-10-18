@@ -1,5 +1,5 @@
-//! The russh client handler: host key verification, connection-loss
-//! notification and routing of `forwarded-tcpip` channels.
+//! The russh client handler: host key verification, login banners,
+//! connection-loss notification and routing of `forwarded-tcpip` channels.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,12 +64,42 @@ impl CloseSignal {
     }
 }
 
+/// Banners (`SSH_MSG_USERAUTH_BANNER`) a server sends while logging in.
+pub(crate) struct Banner {
+    show: Arc<dyn Fn(&str) + Send + Sync>,
+    seen: AtomicBool,
+}
+
+impl Banner {
+    pub(crate) fn new(show: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        Self {
+            show,
+            seen: AtomicBool::new(false),
+        }
+    }
+
+    /// The server has shown a banner.
+    pub(crate) fn seen(&self) -> bool {
+        self.seen.load(Ordering::Relaxed)
+    }
+
+    fn received(&self, text: &str) {
+        let text = text.trim_end();
+        if !text.is_empty() {
+            self.seen.store(true, Ordering::Relaxed);
+            (self.show)(text);
+        }
+    }
+}
+
 /// What the handler needs to verify the server's host key.
 pub(crate) struct HostKeyPolicy {
     pub known_hosts_files: Vec<PathBuf>,
     /// `HostKeyAlias` or hostname.
     pub host: String,
     pub port: u16,
+    /// Accepted without asking when known_hosts doesn't know the host.
+    pub trusted: Vec<PublicKey>,
     pub prompter: Prompter,
 }
 
@@ -82,6 +112,7 @@ pub struct ClientHandler {
     key_check_started: Option<oneshot::Sender<()>>,
     close: Arc<CloseSignal>,
     routes: Arc<ForwardRoutes>,
+    banner: Arc<Banner>,
 }
 
 impl ClientHandler {
@@ -90,6 +121,7 @@ impl ClientHandler {
         key_check_started: oneshot::Sender<()>,
         close: Arc<CloseSignal>,
         routes: Arc<ForwardRoutes>,
+        banner: Arc<Banner>,
     ) -> Self {
         Self {
             policy,
@@ -97,6 +129,7 @@ impl ClientHandler {
             key_check_started: Some(key_check_started),
             close,
             routes,
+            banner,
         }
     }
 
@@ -108,6 +141,7 @@ impl ClientHandler {
             known_hosts_files,
             host,
             port,
+            trusted,
             prompter,
         } = &self.policy;
         let (host, port) = (host.as_str(), *port);
@@ -116,6 +150,9 @@ impl ClientHandler {
 
         match known_hosts::check(known_hosts_files, host, port, key)? {
             HostKeyStatus::Known => {}
+            HostKeyStatus::Unknown if trusted.iter().any(|k| k.key_data() == key.key_data()) => {
+                tracing::debug!(host, port, "host key vouched for by Tailscale");
+            }
             HostKeyStatus::Unknown => {
                 let prompt = Prompt::HostKeyUnknown {
                     host: host.to_owned(),
@@ -187,6 +224,11 @@ impl Handler for ClientHandler {
                 host: self.policy.host.clone(),
             }),
         }
+    }
+
+    async fn auth_banner(&mut self, banner: &str, _session: &mut Session) -> Result<()> {
+        self.banner.received(banner);
+        Ok(())
     }
 
     async fn disconnected(&mut self, reason: DisconnectReason<Self::Error>) -> Result<()> {

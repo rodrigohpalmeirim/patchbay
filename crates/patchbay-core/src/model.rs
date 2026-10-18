@@ -7,15 +7,19 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Stable host identifier. `cfg:<alias>` for hosts from `~/.ssh/config`,
-/// `app:<uuid>` for hosts managed inside Patchbay.
+/// Stable host identifier. `cfg:<alias>` for ssh_config hosts (including
+/// the ones saved in Patchbay), `ts:<stable node id>` for Tailscale devices.
 pub type HostId = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HostSource {
+    /// Written by the user in `~/.ssh/config` (or its includes): read-only.
     SshConfig,
+    /// Saved in Patchbay (`~/.ssh/patchbay.conf`): editable.
     App,
+    /// A device on the user's tailnet.
+    Tailscale,
 }
 
 /// A host as shown in the sidebar. For `SshConfig` hosts the fields are the
@@ -37,9 +41,29 @@ pub struct Host {
     pub group: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Set for Tailscale devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailscale: Option<TailscaleInfo>,
 }
 
-/// Fields the user may set when creating or editing an app-managed host.
+/// What Tailscale knows about a device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscaleInfo {
+    pub online: bool,
+    /// As reported by Tailscale: "linux", "windows", "macOS", ...
+    pub os: String,
+    pub dns_name: Option<String>,
+    pub ips: Vec<String>,
+    /// The device runs Tailscale SSH.
+    pub ssh: bool,
+    /// Login name of the owner; `None` for tagged devices.
+    pub owner: Option<String>,
+    /// Users to offer when asking whom to log in as, best guess first.
+    pub user_suggestions: Vec<String>,
+}
+
+/// Fields the user may set when creating or editing a Patchbay host.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostDraft {
@@ -85,6 +109,9 @@ pub struct ConnectTarget {
     /// Name to look up / record in known_hosts instead of `hostname`.
     pub host_key_alias: Option<String>,
     pub known_hosts_files: Vec<PathBuf>,
+    /// Host keys to accept without asking when known_hosts doesn't know the
+    /// host (OpenSSH format, e.g. advertised by Tailscale SSH).
+    pub trusted_host_keys: Vec<String>,
     pub connect_timeout: Option<Duration>,
     pub server_alive_interval: Option<Duration>,
     /// Hops to traverse before reaching this host, first hop first.
@@ -314,6 +341,9 @@ pub enum CoreEvent {
     },
     /// Host list changed (ssh_config edited on disk, app host saved/deleted).
     HostsChanged,
+    /// The server sent a message to show while logging in (SSH banner),
+    /// e.g. a link to approve the login in a browser.
+    AuthBanner { host_id: HostId, message: String },
     /// A transfer changed state or made progress (progress is throttled).
     Transfer(TransferInfo),
     /// A batch of search results; `done` marks the last batch.
@@ -950,8 +980,16 @@ mod tests {
             serde_json::to_value(CoreEvent::SettingsChanged(settings.clone())).unwrap(),
             json!({
                 "type": "settingsChanged", "closeToTray": true, "launchAtLogin": false,
-                "startMinimized": true, "maxConcurrentTransfers": 3
+                "startMinimized": true, "maxConcurrentTransfers": 3, "tailscale": true
             })
+        );
+        assert_eq!(
+            serde_json::to_value(CoreEvent::AuthBanner {
+                host_id: "ts:n1".into(),
+                message: "hi".into()
+            })
+            .unwrap(),
+            json!({"type": "authBanner", "hostId": "ts:n1", "message": "hi"})
         );
         let partial: AppSettings =
             serde_json::from_value(json!({"closeToTray": false, "maxConcurrentTransfers": 5}))
@@ -1138,6 +1176,8 @@ pub struct AppSettings {
     pub start_minimized: bool,
     /// Transfers running at the same time.
     pub max_concurrent_transfers: u8,
+    /// List the devices of the user's tailnet (if Tailscale is installed).
+    pub tailscale: bool,
 }
 
 impl Default for AppSettings {
@@ -1147,6 +1187,7 @@ impl Default for AppSettings {
             launch_at_login: false,
             start_minimized: true,
             max_concurrent_transfers: 3,
+            tailscale: true,
         }
     }
 }

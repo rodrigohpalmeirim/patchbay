@@ -88,6 +88,7 @@ impl Scratch {
             agent: AgentSource::Disabled,
             host_key_alias: None,
             known_hosts_files: vec![self.known_hosts.clone()],
+            trusted_host_keys: Vec::new(),
             connect_timeout: Some(Duration::from_secs(10)),
             server_alive_interval: None,
             jumps: Vec::new(),
@@ -870,7 +871,15 @@ mod kbd_server {
         /// Password via keyboard-interactive is a partial success; the
         /// server then requires a public key.
         PasswordThenKey,
+        /// Like Tailscale SSH's check mode: a banner with a link, then the
+        /// "none" login is accepted after [`APPROVAL_DELAY`].
+        Approval,
+        /// "none" login is accepted right away.
+        Open,
     }
+
+    pub const BANNER: &str = "To approve, visit https://login.example.com/a/123";
+    pub const APPROVAL_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
     struct Handler {
         scenario: Scenario,
@@ -895,6 +904,21 @@ mod kbd_server {
 
     impl server::Handler for Handler {
         type Error = russh::Error;
+
+        async fn authentication_banner(&mut self) -> Result<Option<String>, Self::Error> {
+            Ok(matches!(self.scenario, Scenario::Approval).then(|| format!("{BANNER}\r\n")))
+        }
+
+        async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+            Ok(match self.scenario {
+                Scenario::Approval => {
+                    tokio::time::sleep(APPROVAL_DELAY).await;
+                    Auth::Accept
+                }
+                Scenario::Open => Auth::Accept,
+                _ => Auth::reject(),
+            })
+        }
 
         async fn auth_keyboard_interactive<'a>(
             &'a mut self,
@@ -940,6 +964,12 @@ mod kbd_server {
     /// Serve `scenario` on an ephemeral port; returns the port and the
     /// known_hosts line for it.
     pub async fn start(scenario: Scenario) -> (u16, String) {
+        let (port, public) = start_with_key(scenario).await;
+        (port, format!("[127.0.0.1]:{port} {public}\n"))
+    }
+
+    /// Like [`start`]; returns the host key in OpenSSH format instead.
+    pub async fn start_with_key(scenario: Scenario) -> (u16, String) {
         let dir = super::test_dir();
         let host_key =
             russh::keys::load_secret_key(dir.join("hostkeys/target/ssh_host_ed25519_key"), None)
@@ -969,8 +999,7 @@ mod kbd_server {
                 });
             }
         });
-        let public = host_key.public_key().to_openssh().unwrap();
-        (port, format!("[127.0.0.1]:{port} {public}\n"))
+        (port, host_key.public_key().to_openssh().unwrap())
     }
 }
 
@@ -1048,4 +1077,50 @@ async fn partial_success_continues_with_next_method() {
     let (h, res) = kbd_scenario(kbd_server::Scenario::PasswordThenKey, Some("id_ed25519")).await;
     res.unwrap();
     assert_eq!(h.count(|p| matches!(p, Prompt::Password { .. })), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn banner_is_shown_and_extends_the_login_wait() {
+    let (port, known) = kbd_server::start(kbd_server::Scenario::Approval).await;
+    let scratch = Scratch::new();
+    scratch.write_known_hosts(&known);
+    let mut h = Harness::friendly();
+    let mut target = scratch.target("approval", port);
+    // Shorter than the server takes to approve: only the banner keeps it going.
+    target.connect_timeout = Some(kbd_server::APPROVAL_DELAY / 3);
+    timed(h.manager.connect(target)).await.unwrap();
+    let mut banners = Vec::new();
+    while let Ok(event) = h.events.try_recv() {
+        if let CoreEvent::AuthBanner { host_id, message } = event {
+            banners.push((host_id, message));
+        }
+    }
+    assert_eq!(
+        banners,
+        [("test:approval".to_owned(), kbd_server::BANNER.to_owned())]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trusted_host_keys_skip_the_prompt() {
+    let (port, public) = kbd_server::start_with_key(kbd_server::Scenario::Open).await;
+    let scratch = Scratch::new();
+    let h = Harness::new(|p| match p {
+        Prompt::HostKeyUnknown { .. } | Prompt::HostKeyChanged { .. } => PromptResponse::Reject,
+        other => friendly(other),
+    });
+    let mut target = scratch.target("trusted", port);
+    target.trusted_host_keys = vec![public];
+    timed(h.manager.connect(target)).await.unwrap();
+    assert_eq!(h.count(is_host_key), 0);
+    assert_eq!(scratch.read_known_hosts(), "", "nothing is recorded");
+
+    // Any other key is still asked about (and rejected here).
+    let mut other = scratch.target("untrusted", port);
+    other.trusted_host_keys = vec![
+        std::fs::read_to_string(test_dir().join("hostkeys/bastion/ssh_host_ed25519_key.pub"))
+            .unwrap(),
+    ];
+    let err = timed(h.manager.connect(other)).await.unwrap_err();
+    assert!(matches!(err, Error::HostKeyRejected { .. }), "{err:?}");
 }

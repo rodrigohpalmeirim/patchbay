@@ -15,6 +15,7 @@ import type {
   HostDraft,
   HostId,
   PromptPayload,
+  SshSharing,
   PortForward,
   PortForwardDraft,
   PortForwardStatus,
@@ -38,10 +39,19 @@ export interface Backend {
   createHost(draft: HostDraft): Promise<Host>;
   updateHost(id: HostId, draft: HostDraft): Promise<Host>;
   deleteHost(id: HostId): Promise<void>;
+  /** Old id -> current id of renamed hosts. */
+  hostRenames(): Promise<Record<HostId, HostId>>;
+  sshSharing(): Promise<SshSharing>;
+  /** Adds or removes `Include patchbay.conf` in ~/.ssh/config. */
+  setSshSharing(shared: boolean): Promise<SshSharing>;
   /** Current state of every known connection, e.g. after a webview reload. */
   listConnections(): Promise<Record<HostId, ConnectionState>>;
-  /** Resolves once connected; rejects with a CommandError on failure. */
-  connect(id: HostId): Promise<void>;
+  /**
+   * Resolves once connected; rejects with a CommandError on failure.
+   * `user` overrides the login user; Tailscale devices without a known user
+   * reject with `userRequired`.
+   */
+  connect(id: HostId, user?: string): Promise<void>;
   disconnect(id: HostId): Promise<void>;
   respondPrompt(id: string, response: PromptResponse): Promise<boolean>;
 
@@ -171,8 +181,11 @@ async function tauriBackend(): Promise<Backend> {
     createHost: (draft) => invoke("create_host", { draft }),
     updateHost: (id, draft) => invoke("update_host", { id, draft }),
     deleteHost: (id) => invoke("delete_host", { id }),
+    hostRenames: () => invoke("host_renames"),
+    sshSharing: () => invoke("ssh_sharing"),
+    setSshSharing: (shared) => invoke("set_ssh_sharing", { shared }),
     listConnections: () => invoke("list_connections"),
-    connect: (id) => invoke("connect", { id }),
+    connect: (id, user) => invoke("connect", { id, user: user ?? null }),
     disconnect: (id) => invoke("disconnect", { id }),
     respondPrompt: (id, response) => invoke("respond_prompt", { id, response }),
     fsHome: (hostId) => invoke("fs_home", { hostId }),

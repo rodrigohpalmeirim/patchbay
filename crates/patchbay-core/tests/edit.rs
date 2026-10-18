@@ -99,6 +99,7 @@ impl Harness {
             agent: AgentSource::Disabled,
             host_key_alias: None,
             known_hosts_files: vec![known_hosts],
+            trusted_host_keys: Vec::new(),
             connect_timeout: Some(Duration::from_secs(10)),
             server_alive_interval: None,
             jumps: Vec::new(),

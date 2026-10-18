@@ -74,14 +74,15 @@
   const hostGroups = $derived.by(() => {
     const sorted = [...hosts.list].sort((a, b) => collator.compare(a.name, b.name));
     const out: { label: string; hosts: Host[] }[] = [];
-    const cfg = sorted.filter((h) => h.source === "sshConfig");
-    if (cfg.length) out.push({ label: "SSH config", hosts: cfg });
+    const ungrouped = sorted.filter((h) => h.source !== "tailscale" && !h.group);
+    if (ungrouped.length) out.push({ label: "Hosts", hosts: ungrouped });
     const groups = new Map<string, Host[]>();
-    for (const h of sorted.filter((h) => h.source === "app")) {
-      const g = h.group ?? "Patchbay hosts";
-      groups.set(g, [...(groups.get(g) ?? []), h]);
+    for (const h of sorted.filter((h) => h.source !== "tailscale" && h.group)) {
+      groups.set(h.group!, [...(groups.get(h.group!) ?? []), h]);
     }
     for (const [label, list] of [...groups].sort(([a], [b]) => collator.compare(a, b))) out.push({ label, hosts: list });
+    const tailnet = sorted.filter((h) => h.source === "tailscale");
+    if (tailnet.length) out.push({ label: "Tailscale", hosts: tailnet });
     return out;
   });
 

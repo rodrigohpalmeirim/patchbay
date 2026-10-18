@@ -3,16 +3,19 @@
   import CopyPlus from "@lucide/svelte/icons/copy-plus";
   import FileText from "@lucide/svelte/icons/file-text";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
+  import Network from "@lucide/svelte/icons/network";
   import Plus from "@lucide/svelte/icons/plus";
+  import Save from "@lucide/svelte/icons/save";
   import Server from "@lucide/svelte/icons/server";
   import X from "@lucide/svelte/icons/x";
   import { tick, untrack } from "svelte";
-  import { duplicateHost } from "../actions";
+  import { duplicateHost, maybeOfferSshSharing } from "../actions";
   import { isTauri } from "../api";
   import ChipInput from "../components/ChipInput.svelte";
   import Combobox from "../components/Combobox.svelte";
   import Dialog from "../components/Dialog.svelte";
   import HostDetails from "../components/HostDetails.svelte";
+  import { connections } from "../stores/connections.svelte";
   import { hosts } from "../stores/hosts.svelte";
   import { tabs } from "../stores/tabs.svelte";
   import { toasts } from "../stores/toasts.svelte";
@@ -66,7 +69,9 @@
     const e: Partial<Record<keyof Form, string>> = {};
     const name = form.name.trim();
     if (!name) e.name = "Give the host a name.";
-    else if (/[\s,]/.test(name)) e.name = "No spaces or commas — the name can be used in ProxyJump.";
+    else if (/\s/.test(name)) e.name = "No spaces: the name is also what you type after ssh.";
+    else if (/[*?!,"'#=\\@]/.test(name)) e.name = "Use letters, digits and - _ . only.";
+    else if (name.startsWith("-")) e.name = "The name can’t start with -.";
     else {
       const clash = hosts.findByName(name);
       if (clash && clash.id !== selfId) e.name = `Another host is already called “${clash.name}”.`;
@@ -93,7 +98,9 @@
   // them on blur shifts the layout under the pointer mid-click.)
   const show = (field: keyof Form) => (submitted ? errors[field] : undefined);
 
-  const jumpOptions = $derived(hosts.list.filter((h) => h.id !== selfId).map((h) => h.name));
+  const jumpOptions = $derived(
+    hosts.list.filter((h) => h.id !== selfId && h.source !== "tailscale").map((h) => h.name),
+  );
   const describeHost = (name: string) => {
     const h = hosts.findByName(name);
     return h ? address(h) : undefined;
@@ -128,11 +135,16 @@
       const draft = toDraft();
       if (editor.mode === "edit") {
         const host = await hosts.update(editor.hostId, draft);
+        if (host.id !== editor.hostId) {
+          tabs.retarget((id) => hosts.currentId(id));
+          connections.forget(editor.hostId);
+        }
         toasts.success(`Saved ${host.name}`);
       } else {
         const host = await hosts.create(draft);
         tabs.openHost(host.id);
         toasts.success(`Added ${host.name}`);
+        maybeOfferSshSharing();
       }
       ui.editor = null;
     } catch (err) {
@@ -199,7 +211,27 @@
 {/snippet}
 
 <Dialog onclose={close} labelledby="editor-title" width={readOnly ? 500 : 560} dismissable={readOnly}>
-  {#if readOnly && existing}
+  {#if readOnly && existing?.source === "tailscale"}
+    <div class="dialog-header">
+      <span class="dialog-icon"><Network size={18} /></span>
+      <div>
+        <h2 class="dialog-title" id="editor-title">{existing.name}</h2>
+        <p class="dialog-subtitle">On your tailnet</p>
+      </div>
+    </div>
+    <div class="dialog-body">
+      <p class="readonly-note">
+        Devices on your tailnet are listed automatically, with settings from <code>~/.ssh/config</code>. Save this one as a host to
+        give it settings of its own.
+      </p>
+      <HostDetails host={existing} linkHops={false} />
+    </div>
+    <div class="dialog-footer">
+      <span class="spacer"></span>
+      <button type="button" class="btn" onclick={() => (ui.editor = null)} data-autofocus>Close</button>
+      <button type="button" class="btn btn-primary" onclick={duplicate}><Save size={14} /> Save as host</button>
+    </div>
+  {:else if readOnly && existing}
     <div class="dialog-header">
       <span class="dialog-icon"><FileText size={18} /></span>
       <div>
@@ -209,8 +241,8 @@
     </div>
     <div class="dialog-body">
       <p class="readonly-note">
-        Hosts from your SSH config are read-only in Patchbay. Edit <code>~/.ssh/config</code> to change this one, or duplicate it
-        as a Patchbay host you can edit here.
+        Hosts you wrote in your SSH config are read-only in Patchbay. Edit <code>~/.ssh/config</code> to change this one, or
+        duplicate it as a Patchbay host you can edit here.
       </p>
       <HostDetails host={existing} linkHops={false} />
     </div>
@@ -226,7 +258,9 @@
         <div>
           <h2 class="dialog-title" id="editor-title">{title}</h2>
           <p class="dialog-subtitle">
-            {editor.mode === "create" ? "Saved in Patchbay’s own host list." : "Changes apply to the next connection."}
+            {editor.mode === "create"
+              ? "Saved in ~/.ssh/patchbay.conf, an SSH config file Patchbay keeps for you."
+              : "Changes apply to the next connection."}
           </p>
         </div>
       </div>
@@ -248,7 +282,7 @@
                 aria-describedby="f-name-msg"
                 data-autofocus
               />
-              {@render fieldError("name")}
+              {@render fieldError("name", "Also the name to use with ssh and in proxy jumps.")}
             </div>
             <div class="field span-host">
               <label for="f-hostname">Hostname</label>

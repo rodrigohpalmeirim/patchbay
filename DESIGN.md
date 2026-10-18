@@ -29,7 +29,20 @@ docker/             OpenSSH test containers (target, bastion, SFTP-only, Windows
 
 - Host list = `~/.ssh/config` (read-only, live-reloaded; supports `Host` patterns,
   `Include`, `HostName`, `User`, `Port`, `IdentityFile`, `ProxyJump`, `LocalForward`/`RemoteForward`/`DynamicForward`)
-  **plus** app-managed hosts stored in the app config dir. Each host can be grouped and tagged.
+  **plus** the hosts created in Patchbay, plus devices on the user's tailnet.
+- Hosts created in Patchbay are ssh_config hosts too: they live in `~/.ssh/patchbay.conf`, which
+  Patchbay owns but keeps hand edits in (only `HostName`/`User`/`Port`/`IdentityFile`/`ProxyJump`
+  of a `Host <alias>` block are rewritten). With the user's consent, one `Include patchbay.conf`
+  line at the top of `~/.ssh/config` makes them work with `ssh` and other tools; until then Patchbay
+  reads the file as if it were included there. Their name is their ssh alias (`cfg:<alias>` ids;
+  renames are remembered so tabs, forwards and snippets follow). Groups and tags, which ssh_config
+  has no place for, stay in the app config dir. Hand-written hosts in `~/.ssh/config` stay read-only.
+- Tailscale: `tailscale status --json` (polled) lists the tailnet's devices (`ts:<stable node id>`),
+  except ones a config host already points at. Their name goes through ssh_config (`Host *.ts.net`
+  rules apply); the user comes from ssh_config, else the last one that worked, else the user is asked.
+  Connections go to the Tailscale IP, host keys are checked under the MagicDNS name, and keys
+  advertised by Tailscale SSH are accepted without a prompt. Login banners are shown (Tailscale SSH
+  "check" mode sends an approval link) and extend the authentication timeout.
 - One SSH connection per host, shared by all channels (SFTP, shells, forwards). Keepalive + auto-reconnect.
 - Auth: key files (+ passphrase), SSH agent (Unix socket, Windows OpenSSH named pipe, Pageant),
   password, keyboard-interactive (2FA/OTP prompts surfaced in the UI).

@@ -5,6 +5,7 @@ const KINDS: ReadonlySet<string> = new Set<ErrorKind>([
   "readOnlyHost",
   "hostKeyRejected",
   "authFailed",
+  "userRequired",
   "cancelled",
   "notConnected",
   "timeout",
@@ -39,6 +40,8 @@ export function errorTitle(kind: ErrorKind): string {
   switch (kind) {
     case "authFailed":
       return "Authentication failed";
+    case "userRequired":
+      return "Who should Patchbay log in as?";
     case "hostKeyRejected":
       return "Host key not accepted";
     case "timeout":

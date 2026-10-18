@@ -4,6 +4,7 @@
 //! that is rewritten atomically on every change. Ids look like
 //! `snip:<uuid>`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -77,6 +78,23 @@ impl SnippetStore {
         self.commit(snippets)
     }
 
+    /// Points snippets at the new ids of renamed hosts (old id -> new id).
+    /// Returns whether any snippet changed.
+    pub fn rename_hosts(&mut self, renamed: &BTreeMap<HostId, HostId>) -> Result<bool> {
+        let mut snippets = self.snippets.clone();
+        let mut changed = false;
+        for id in snippets.iter_mut().flat_map(|s| s.host_ids.iter_mut()) {
+            if let Some(new) = renamed.get(id.as_str()) {
+                id.clone_from(new);
+                changed = true;
+            }
+        }
+        if changed {
+            self.commit(snippets)?;
+        }
+        Ok(changed)
+    }
+
     fn index(&self, id: &str) -> Result<usize> {
         self.snippets
             .iter()
@@ -147,6 +165,24 @@ mod tests {
             command: command.into(),
             ..SnippetDraft::default()
         }
+    }
+
+    #[test]
+    fn renamed_hosts_are_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snippets.json");
+        let mut store = SnippetStore::load(path.clone()).unwrap();
+        let s = store
+            .create(SnippetDraft {
+                host_ids: vec!["app:1".into(), "cfg:b".into()],
+                ..draft("x", "y")
+            })
+            .unwrap();
+        let renamed = BTreeMap::from([("app:1".to_owned(), "cfg:a".to_owned())]);
+        assert!(store.rename_hosts(&renamed).unwrap());
+        assert!(!store.rename_hosts(&renamed).unwrap());
+        let again = SnippetStore::load(path).unwrap();
+        assert_eq!(again.get(&s.id).unwrap().host_ids, ["cfg:a", "cfg:b"]);
     }
 
     #[test]

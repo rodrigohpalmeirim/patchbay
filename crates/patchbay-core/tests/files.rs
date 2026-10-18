@@ -59,6 +59,7 @@ fn connect_target(id: &str, port: u16, known_hosts: PathBuf) -> ConnectTarget {
         agent: AgentSource::Disabled,
         host_key_alias: None,
         known_hosts_files: vec![known_hosts],
+        trusted_host_keys: Vec::new(),
         connect_timeout: Some(Duration::from_secs(10)),
         server_alive_interval: None,
         jumps: Vec::new(),
