@@ -1,6 +1,7 @@
 <script lang="ts">
   import Cable from "@lucide/svelte/icons/cable";
   import Ellipsis from "@lucide/svelte/icons/ellipsis";
+  import Lock from "@lucide/svelte/icons/lock";
   import Plug from "@lucide/svelte/icons/plug";
   import Unplug from "@lucide/svelte/icons/unplug";
   import X from "@lucide/svelte/icons/x";
@@ -33,6 +34,7 @@
   const busy = $derived(status === "busy");
   const forwarding = $derived(forwards.activeFor(host.id).length);
   const offline = $derived(!!host.tailscale && !host.tailscale.online);
+  const readOnly = $derived(host.config?.readOnly ?? null);
   /** Tailscale devices: the IP (the name already is the MagicDNS name). */
   const addr = $derived(
     host.tailscale ? `${host.user ? `${host.user}@` : ""}${host.tailscale.ips[0] ?? host.hostname}` : address(host),
@@ -87,8 +89,13 @@
     <StatusDot {status} />
     <span class="sr-only">{STATUS_LABEL[status]}:</span>
     <span class="text">
-      <span class="name">
-        {#each runs as run, i (i)}{#if run.hit}<mark>{run.text}</mark>{:else}{run.text}{/if}{/each}
+      <span class="name-row">
+        <span class="name">
+          {#each runs as run, i (i)}{#if run.hit}<mark>{run.text}</mark>{:else}{run.text}{/if}{/each}
+        </span>
+        {#if readOnly}
+          <span class="ro" title="Read-only: {readOnly}"><Lock size={11} /><span class="sr-only">(read-only)</span></span>
+        {/if}
       </span>
       <span class="addr">{addr}{#if offline}{" · offline"}{/if}</span>
     </span>
@@ -168,6 +175,17 @@
     min-width: 0;
     flex: 1;
     line-height: 1.25;
+  }
+  .name-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+  }
+  .ro {
+    display: inline-flex;
+    flex: none;
+    color: var(--text-subtle);
   }
   .name {
     overflow: hidden;

@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, HashMap};
 
 use patchbay_core::model::{ConnectionState, CoreEvent, Host, HostDraft, HostId, PromptResponse};
-use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
 
@@ -34,7 +33,7 @@ pub async fn create_host(state: State<'_, AppState>, draft: HostDraft) -> Comman
     Ok(host)
 }
 
-/// Saves a Patchbay host. Renaming changes its id; saved port forwards and
+/// Saves a host in its config file. Renaming changes its id; saved port forwards and
 /// snippets follow, and the frontend learns the new id from the result (and
 /// `host_renames`).
 #[tauri::command]
@@ -68,33 +67,50 @@ pub async fn host_renames(state: State<'_, AppState>) -> CommandResult<BTreeMap<
     Ok(state.hosts.read().await.renamed().clone())
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SshSharing {
-    /// `~/.ssh/config` includes the file Patchbay hosts are saved in.
-    pub shared: bool,
-    /// That file (`~/.ssh/patchbay.conf`).
-    pub path: String,
+/// The file new hosts are added to (`~/.ssh/config`, unless that can't be
+/// written).
+#[tauri::command]
+pub async fn new_host_file(state: State<'_, AppState>) -> CommandResult<String> {
+    Ok(state
+        .hosts
+        .read()
+        .await
+        .new_host_file()
+        .display()
+        .to_string())
 }
 
+/// Sets the group and tags of a config host (read-only ones too).
 #[tauri::command]
-pub async fn ssh_sharing(state: State<'_, AppState>) -> CommandResult<SshSharing> {
-    let hosts = state.hosts.read().await;
-    Ok(SshSharing {
-        shared: hosts.shared_with_ssh(),
-        path: hosts.managed_path().display().to_string(),
-    })
-}
-
-/// Adds or removes the `Include patchbay.conf` line in `~/.ssh/config`.
-#[tauri::command]
-pub async fn set_ssh_sharing(
+pub async fn organize_host(
     state: State<'_, AppState>,
-    shared: bool,
-) -> CommandResult<SshSharing> {
-    state.hosts.write().await.set_shared_with_ssh(shared)?;
+    id: HostId,
+    group: Option<String>,
+    tags: Vec<String>,
+) -> CommandResult<Host> {
+    let host = state.hosts.write().await.organize(&id, group, tags)?;
     let _ = state.events.send(CoreEvent::HostsChanged);
-    ssh_sharing(state).await
+    Ok(host)
+}
+
+/// Opens the config file a host is defined in with the default app.
+#[tauri::command]
+pub async fn open_host_file(state: State<'_, AppState>, id: HostId) -> CommandResult<()> {
+    let file = state
+        .hosts
+        .read()
+        .await
+        .get(&id)
+        .and_then(|h| h.config)
+        .map(|c| c.file)
+        .ok_or_else(|| CommandError {
+            kind: "unknownHost",
+            message: format!("unknown host {id}"),
+        })?;
+    tauri_plugin_opener::open_path(file, None::<&str>).map_err(|e| CommandError {
+        kind: "other",
+        message: format!("Couldn't open the file: {e}"),
+    })
 }
 
 #[tauri::command]

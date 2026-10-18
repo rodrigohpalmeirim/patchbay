@@ -1,26 +1,28 @@
 //! The host list and resolution of a host into a [`ConnectTarget`].
 //!
-//! Hosts come from three places:
+//! Hosts come from two places:
 //!
-//! - `~/.ssh/config` and its includes: read-only, identified as `cfg:<alias>`.
-//! - `~/.ssh/patchbay.conf` (see [`managed`]): the hosts created in Patchbay.
-//!   They are ssh_config hosts too (`cfg:<alias>`), but editable. The file is
-//!   meant to be included from `~/.ssh/config` so `ssh <alias>` works as well
-//!   ([`HostStore::set_shared_with_ssh`]); until it is, Patchbay reads it as
-//!   if it were included at the top.
+//! - `~/.ssh/config` and its includes, identified as `cfg:<alias>`. Patchbay
+//!   edits hosts in place when they have a block of their own (`Host
+//!   <alias>`) in a file it can write (see [`config_file`]), and adds new
+//!   ones to `~/.ssh/config`. If that file can't be written (say, a dotfile
+//!   manager owns it), new hosts go to `~/.ssh/patchbay.conf` instead, which
+//!   Patchbay reads as if it were included at the top.
 //! - Devices on the user's tailnet ([`HostStore::set_tailnet`]), identified
 //!   as `ts:<stable node id>`, unless a config host already points at them.
 //!
-//! Groups and tags of Patchbay hosts, the user last logged in as per
+//! Groups and tags of config hosts, the user last logged in as per
 //! Tailscale device, and the ids of renamed hosts live in a schema-versioned
 //! JSON file (`<config_dir>/patchbay/hosts.json`). Version 1 of that file
-//! held the hosts themselves; they are moved to patchbay.conf on load.
+//! held the hosts themselves, and Patchbay 0.1 kept them in patchbay.conf
+//! (included from `~/.ssh/config`); both are moved into `~/.ssh/config` on
+//! load.
 //!
 //! CONTRACT (used by the Tauri layer and `session`): keep these signatures stable.
 
-mod managed;
+mod config_file;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,15 +30,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::forward::config_rules;
 use crate::model::{
-    AgentSource, AuthMethods, ConnectTarget, Host, HostDraft, HostId, HostSource, PortForward,
-    TailscaleInfo,
+    AgentSource, AuthMethods, ConfigInfo, ConnectTarget, Host, HostDraft, HostId, HostSource,
+    PortForward, TailscaleInfo, WrittenOptions,
 };
 use crate::persist;
 use crate::ssh_config::{LocalEnv, ResolveOverrides, ResolvedHost, SshConfig};
 use crate::tailscale::{TailnetStatus, TailscaleDevice};
 use crate::{Error, Result};
 
-use managed::{Entry, ManagedConfig};
+use config_file::{ConfigFile, Entry};
 
 const SCHEMA_VERSION: u32 = 2;
 
@@ -66,7 +68,7 @@ struct StoredHost {
     tags: Vec<String>,
 }
 
-/// How a Patchbay host is organized in the sidebar.
+/// How a host is organized in the sidebar.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HostMeta {
@@ -77,6 +79,20 @@ struct HostMeta {
 }
 
 impl HostMeta {
+    fn new(group: Option<String>, tags: Vec<String>) -> Self {
+        let mut clean: Vec<String> = Vec::new();
+        for t in tags {
+            let t = t.trim().to_owned();
+            if !t.is_empty() && !clean.contains(&t) {
+                clean.push(t);
+            }
+        }
+        Self {
+            group: non_empty(group),
+            tags: clean,
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.group.is_none() && self.tags.is_empty()
     }
@@ -89,7 +105,7 @@ struct MetaFile {
     /// Schema 1: the hosts themselves.
     #[serde(default, skip_serializing)]
     hosts: Vec<StoredHost>,
-    /// Group and tags of Patchbay hosts, by lower-cased alias.
+    /// Group and tags of config hosts, by lower-cased alias.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     host_meta: BTreeMap<String, HostMeta>,
     /// Old id -> current id of renamed hosts, so references kept elsewhere
@@ -101,18 +117,27 @@ struct MetaFile {
     tailscale_users: BTreeMap<String, String>,
 }
 
+/// A config file with hosts in it, parsed for editing.
+struct EditableFile {
+    file: ConfigFile,
+    /// Why the file can't be written, if it can't.
+    problem: Option<String>,
+}
+
 /// Owner of the host list. Not internally synchronized; wrap in a lock when
 /// shared.
 pub struct HostStore {
     ssh_config_path: PathBuf,
-    managed_path: PathBuf,
+    /// `~/.ssh/patchbay.conf`.
+    fallback_path: PathBuf,
     meta_path: PathBuf,
     env: LocalEnv,
     config: SshConfig,
-    managed: ManagedConfig,
-    meta: MetaFile,
+    /// Files that define hosts, by path as the parser saw it.
+    files: HashMap<PathBuf, EditableFile>,
     /// `~/.ssh/config` includes patchbay.conf.
-    shared_with_ssh: bool,
+    fallback_included: bool,
+    meta: MetaFile,
     tailnet: Option<TailnetStatus>,
     hosts: Vec<Host>,
     cfg_forwards: Vec<PortForward>,
@@ -120,7 +145,7 @@ pub struct HostStore {
 }
 
 impl HostStore {
-    /// Default locations: `~/.ssh/config`, `~/.ssh/patchbay.conf` and
+    /// Default locations: `~/.ssh/config` and
     /// `<config_dir>/patchbay/hosts.json`.
     pub fn load_default() -> Result<Self> {
         let env = LocalEnv::detect();
@@ -142,19 +167,19 @@ impl HostStore {
     /// Explicit locations and local environment (home directory, user name).
     /// patchbay.conf lives next to `ssh_config`.
     pub fn load_with_env(ssh_config: PathBuf, meta: PathBuf, env: LocalEnv) -> Result<Self> {
-        let managed_path = ssh_config
+        let fallback_path = ssh_config
             .parent()
             .unwrap_or(Path::new("."))
-            .join(managed::FILE_NAME);
+            .join(config_file::LEGACY_FILE_NAME);
         let mut store = Self {
             config: SshConfig::empty(env.clone()),
             ssh_config_path: ssh_config,
-            managed_path,
+            fallback_path,
             meta_path: meta,
             env,
-            managed: ManagedConfig::default(),
+            files: HashMap::new(),
+            fallback_included: false,
             meta: MetaFile::default(),
-            shared_with_ssh: false,
             tailnet: None,
             hosts: Vec::new(),
             cfg_forwards: Vec::new(),
@@ -168,22 +193,42 @@ impl HostStore {
     /// Re-read everything from disk.
     pub fn reload(&mut self) -> Result<()> {
         let meta = read_meta(&self.meta_path)?;
-        let managed = ManagedConfig::load(&self.managed_path)?;
         let plain = SshConfig::load_with_env(&self.ssh_config_path, self.env.clone())?;
-        let shared = plain.includes(&self.managed_path);
-        let config = if shared || !self.managed_path.exists() {
+        let included = plain.includes(&self.fallback_path);
+        let config = if included || !self.fallback_path.exists() {
             plain
         } else {
             SshConfig::load_with_prelude(
                 &self.ssh_config_path,
                 self.env.clone(),
-                &self.managed_path,
+                &self.fallback_path,
             )?
         };
+        let mut files = HashMap::new();
+        for alias in config.host_aliases() {
+            let Some(origin) = config.alias_origin(alias) else {
+                continue;
+            };
+            if files.contains_key(&origin.file) {
+                continue;
+            }
+            let path = origin.file.clone();
+            let editable = match ConfigFile::load(&path) {
+                Ok(file) => EditableFile {
+                    file,
+                    problem: config_file::write_problem(&path),
+                },
+                Err(e) => EditableFile {
+                    file: ConfigFile::default(),
+                    problem: Some(format!("the file can't be read ({e})")),
+                },
+            };
+            files.insert(path, editable);
+        }
         self.meta = meta;
-        self.managed = managed;
         self.config = config;
-        self.shared_with_ssh = shared;
+        self.files = files;
+        self.fallback_included = included;
         self.refresh();
         Ok(())
     }
@@ -194,8 +239,7 @@ impl HostStore {
         &self.warnings
     }
 
-    /// Config hosts in file order, then Patchbay hosts by group and name,
-    /// then Tailscale devices by name.
+    /// Config hosts in file order, then Tailscale devices.
     pub fn list(&self) -> Vec<Host> {
         self.hosts.clone()
     }
@@ -216,32 +260,14 @@ impl HostStore {
         &self.meta.renamed
     }
 
-    /// Where Patchbay hosts are written.
-    pub fn managed_path(&self) -> &Path {
-        &self.managed_path
-    }
-
-    /// Whether `~/.ssh/config` includes patchbay.conf, so `ssh` sees the
-    /// hosts saved in Patchbay.
-    pub fn shared_with_ssh(&self) -> bool {
-        self.shared_with_ssh
-    }
-
-    /// Adds (or removes) the `Include patchbay.conf` line at the top of
-    /// `~/.ssh/config`.
-    pub fn set_shared_with_ssh(&mut self, share: bool) -> Result<()> {
-        if share == self.shared_with_ssh {
-            return Ok(());
-        }
-        if share {
-            if !self.managed_path.exists() {
-                self.managed.save(&self.managed_path)?;
-            }
-            managed::add_include(&self.ssh_config_path)?;
+    /// Where [`create`](Self::create) adds hosts: `~/.ssh/config`, or
+    /// patchbay.conf if that can't be written.
+    pub fn new_host_file(&self) -> PathBuf {
+        if config_file::write_problem(&self.ssh_config_path).is_none() {
+            self.ssh_config_path.clone()
         } else {
-            managed::remove_include(&self.ssh_config_path, &self.managed_path)?;
+            self.fallback_path.clone()
         }
-        self.reload()
     }
 
     /// The tailnet as last seen (`None`: Tailscale not installed or not
@@ -253,12 +279,14 @@ impl HostStore {
         }
     }
 
+    /// Adds a host to the SSH config (see [`new_host_file`](Self::new_host_file)).
     pub fn create(&mut self, draft: HostDraft) -> Result<Host> {
         let (entry, meta) = validate(draft, &self.env.home)?;
         self.check_alias_free(&entry.alias, None)?;
-        let mut managed = self.managed.clone();
-        managed.upsert(None, &entry);
-        managed.save(&self.managed_path)?;
+        let path = self.new_host_file();
+        let mut file = ConfigFile::load(&path)?;
+        file.insert(&entry);
+        file.save(&path)?;
         let id = format!("cfg:{}", entry.alias);
         self.meta.renamed.remove(&id);
         set_meta(&mut self.meta, &entry.alias, meta);
@@ -267,29 +295,27 @@ impl HostStore {
         self.get(&id).ok_or(Error::UnknownHost(id))
     }
 
-    /// Saves a Patchbay host. Renaming it changes its id (`cfg:<alias>`);
-    /// the old id is remembered in [`renamed`](Self::renamed) and ProxyJump
-    /// references from other Patchbay hosts are updated. Errors with
-    /// `ReadOnlyHost` for hosts that aren't Patchbay's.
+    /// Saves a host, editing its block in place. Renaming it changes its id
+    /// (`cfg:<alias>`); the old id is remembered in
+    /// [`renamed`](Self::renamed) and ProxyJump references to it are
+    /// updated. Errors with `ReadOnlyHost` for hosts Patchbay can't edit
+    /// (see [`ConfigInfo::read_only`]).
     pub fn update(&mut self, id: &str, draft: HostDraft) -> Result<Host> {
-        let old = self.editable(id)?.name;
+        let (old, path) = self.editable(id)?;
         let (entry, meta) = validate(draft, &self.env.home)?;
         self.check_alias_free(&entry.alias, Some(&old))?;
-        let mut managed = self.managed.clone();
-        managed.upsert(Some(&old), &entry);
         let new_id = format!("cfg:{}", entry.alias);
-        if new_id != id {
-            for mut other in managed.entries() {
-                if let Some(spec) = &other.proxy_jump
-                    && let Some(renamed) = rename_hop(spec, &old, &entry.alias)
-                {
-                    other.proxy_jump = Some(renamed);
-                    let alias = other.alias.clone();
-                    managed.upsert(Some(&alias), &other);
-                }
-            }
+        let mut file = ConfigFile::load(&path)?;
+        if !file.update(&old, &entry) {
+            return Err(self.changed_on_disk(&path));
         }
-        managed.save(&self.managed_path)?;
+        if new_id != id {
+            file.rename_jumps(&old, &entry.alias);
+        }
+        file.save(&path)?;
+        if new_id != id {
+            self.rename_jumps_elsewhere(&path, &old, &entry.alias);
+        }
         self.meta.host_meta.remove(&old.to_lowercase());
         set_meta(&mut self.meta, &entry.alias, meta);
         if new_id != id {
@@ -306,12 +332,29 @@ impl HostStore {
         self.get(&new_id).ok_or(Error::UnknownHost(new_id))
     }
 
-    /// Errors with `ReadOnlyHost` for hosts that aren't Patchbay's.
+    /// Sets the group and tags of any config host (read-only ones too: they
+    /// are Patchbay's, not ssh's).
+    pub fn organize(&mut self, id: &str, group: Option<String>, tags: Vec<String>) -> Result<Host> {
+        let host = self
+            .get(id)
+            .filter(|h| h.source == HostSource::SshConfig)
+            .ok_or_else(|| Error::UnknownHost(id.to_owned()))?;
+        set_meta(&mut self.meta, &host.name, HostMeta::new(group, tags));
+        write_meta(&self.meta_path, &self.meta)?;
+        self.refresh();
+        self.get(id)
+            .ok_or_else(|| Error::UnknownHost(id.to_owned()))
+    }
+
+    /// Removes a host's block. Errors with `ReadOnlyHost` for hosts Patchbay
+    /// can't edit.
     pub fn delete(&mut self, id: &str) -> Result<()> {
-        let alias = self.editable(id)?.name;
-        let mut managed = self.managed.clone();
-        managed.remove(&alias);
-        managed.save(&self.managed_path)?;
+        let (alias, path) = self.editable(id)?;
+        let mut file = ConfigFile::load(&path)?;
+        if !file.remove(&alias) {
+            return Err(self.changed_on_disk(&path));
+        }
+        file.save(&path)?;
         if self.meta.host_meta.remove(&alias.to_lowercase()).is_some() {
             write_meta(&self.meta_path, &self.meta)?;
         }
@@ -413,12 +456,43 @@ impl HostStore {
             .user
     }
 
-    /// The Patchbay host `id`, or why it can't be edited.
-    fn editable(&self, id: &str) -> Result<Host> {
-        match self.get(id) {
-            Some(h) if h.source == HostSource::App => Ok(h),
-            Some(_) => Err(Error::ReadOnlyHost(id.to_owned())),
-            None => Err(Error::UnknownHost(id.to_owned())),
+    /// The alias of host `id` and the file its block is in, or why it can't
+    /// be edited.
+    fn editable(&self, id: &str) -> Result<(String, PathBuf)> {
+        let host = self
+            .get(id)
+            .ok_or_else(|| Error::UnknownHost(id.to_owned()))?;
+        match host.config {
+            Some(c) if c.read_only.is_none() => Ok((host.name, c.file)),
+            _ => Err(Error::ReadOnlyHost(id.to_owned())),
+        }
+    }
+
+    fn changed_on_disk(&self, path: &Path) -> Error {
+        Error::Other(format!(
+            "{} changed on disk; reload the host list and try again",
+            self.display(path)
+        ))
+    }
+
+    /// Points ProxyJump hops to `old` at `new` in the other config files
+    /// Patchbay can write. Best effort: the rename itself is done.
+    fn rename_jumps_elsewhere(&self, done: &Path, old: &str, new: &str) {
+        let mut seen: HashSet<PathBuf> = HashSet::from([config_file::follow(done)]);
+        for path in self.config.files() {
+            if !seen.insert(config_file::follow(path)) || config_file::write_problem(path).is_some()
+            {
+                continue;
+            }
+            let result = ConfigFile::load(path).and_then(|mut f| {
+                if f.rename_jumps(old, new) {
+                    f.save(path)?;
+                }
+                Ok(())
+            });
+            if let Err(e) = result {
+                tracing::warn!("could not update ProxyJump in {}: {e}", path.display());
+            }
         }
     }
 
@@ -435,14 +509,27 @@ impl HostStore {
         }
     }
 
-    /// Moves the hosts of a schema 1 file into patchbay.conf.
+    /// `~/...` for paths in the home directory.
+    fn display(&self, path: &Path) -> String {
+        portable_path(path, &self.env.home)
+    }
+
+    /// Moves hosts kept elsewhere by older versions into `~/.ssh/config`:
+    /// patchbay.conf (Patchbay 0.1), then the hosts of a schema 1 file.
     fn migrate(&mut self) -> Result<()> {
+        if self.fallback_path.exists()
+            && config_file::write_problem(&self.ssh_config_path).is_none()
+        {
+            self.migrate_patchbay_conf()?;
+            self.reload()?;
+        }
         if self.meta.version >= SCHEMA_VERSION {
             return Ok(());
         }
         let old = std::mem::take(&mut self.meta.hosts);
         if !old.is_empty() {
-            let mut managed = self.managed.clone();
+            let path = self.new_host_file();
+            let mut file = ConfigFile::load(&path)?;
             let mut taken: HashSet<String> = self
                 .config
                 .host_aliases()
@@ -451,52 +538,74 @@ impl HostStore {
                 .collect();
             for h in old {
                 let base = sanitize_alias(&h.name);
-                let alias = match managed.get(&base) {
+                let alias = match file.get(&base) {
                     // Left behind by an interrupted migration.
                     Some(e) if e.hostname.as_deref() == Some(h.hostname.as_str()) => e.alias,
                     _ => {
                         let alias = unique_alias(&base, &taken);
-                        managed.upsert(
-                            None,
-                            &Entry {
-                                alias: alias.clone(),
-                                hostname: Some(h.hostname),
-                                port: h.port,
-                                user: h.user,
-                                identity_files: h
-                                    .identity_files
-                                    .iter()
-                                    .map(|p| portable_path(p, &self.env.home))
-                                    .collect(),
-                                proxy_jump: h.proxy_jump,
-                            },
-                        );
+                        file.insert(&Entry {
+                            alias: alias.clone(),
+                            hostname: Some(h.hostname),
+                            port: h.port,
+                            user: h.user,
+                            identity_files: h
+                                .identity_files
+                                .iter()
+                                .map(|p| portable_path(p, &self.env.home))
+                                .collect(),
+                            proxy_jump: h.proxy_jump,
+                        });
                         alias
                     }
                 };
                 taken.insert(alias.to_lowercase());
-                set_meta(
-                    &mut self.meta,
-                    &alias,
-                    HostMeta {
-                        group: h.group,
-                        tags: h.tags,
-                    },
-                );
+                set_meta(&mut self.meta, &alias, HostMeta::new(h.group, h.tags));
                 self.meta.renamed.insert(h.id, format!("cfg:{alias}"));
             }
-            managed.save(&self.managed_path)?;
+            file.save(&path)?;
             let backup = self.meta_path.with_extension("v1.json");
             if let Err(e) = fs::copy(&self.meta_path, &backup) {
                 tracing::warn!("could not back up {}: {e}", self.meta_path.display());
             }
-            tracing::info!("moved Patchbay hosts to {}", self.managed_path.display());
+            tracing::info!("moved Patchbay hosts to {}", path.display());
         }
         if self.meta_path.exists() {
             self.meta.version = SCHEMA_VERSION;
             write_meta(&self.meta_path, &self.meta)?;
         }
         self.reload()
+    }
+
+    /// Moves the contents of patchbay.conf into `~/.ssh/config` (ahead of
+    /// any `Host *`), drops the `Include` line Patchbay 0.1 added, and
+    /// renames patchbay.conf to patchbay.conf.bak.
+    fn migrate_patchbay_conf(&mut self) -> Result<()> {
+        let conf = ConfigFile::load(&self.fallback_path)?;
+        let mut main = ConfigFile::load(&self.ssh_config_path)?;
+        let before = main.render();
+        config_file::remove_legacy_include(&mut main, &self.fallback_path);
+        // If a previous run stopped after writing ~/.ssh/config, the hosts
+        // are there already.
+        let plain = SshConfig::load_with_env(&self.ssh_config_path, self.env.clone())?;
+        let moved = conf.entries().iter().any(|e| {
+            plain
+                .alias_origin(&e.alias)
+                .is_some_and(|o| o.file != self.fallback_path)
+        });
+        if !moved {
+            main.insert_lines(conf.without_legacy_header());
+        }
+        if main.render() != before {
+            main.save(&self.ssh_config_path)?;
+        }
+        let backup = self.fallback_path.with_extension("conf.bak");
+        fs::rename(&self.fallback_path, &backup)?;
+        tracing::info!(
+            "moved the hosts in {} to {}",
+            self.fallback_path.display(),
+            self.ssh_config_path.display()
+        );
+        Ok(())
     }
 
     /// Recompute the host list and the warning list.
@@ -509,9 +618,7 @@ impl HostStore {
                 }
             }
         };
-        let entries = self.managed.entries();
         let mut cfg_hosts = Vec::new();
-        let mut app_hosts = Vec::new();
         let mut cfg_forwards = Vec::new();
         // Names and addresses config hosts point at (to hide duplicate
         // Tailscale devices).
@@ -523,56 +630,28 @@ impl HostStore {
             push(forward_warnings);
             targets.insert(alias.to_lowercase());
             targets.insert(r.hostname.trim_end_matches('.').to_lowercase());
-            let entry = entries
-                .iter()
-                .find(|e| e.alias.eq_ignore_ascii_case(alias))
-                .filter(|_| self.config.alias_file(alias) == Some(self.managed_path.as_path()));
-            match entry {
-                Some(e) => {
-                    let meta = self
-                        .meta
-                        .host_meta
-                        .get(&alias.to_lowercase())
-                        .cloned()
-                        .unwrap_or_default();
-                    // Options as written (that's what the editor shows),
-                    // except the port, which shows the effective one.
-                    app_hosts.push(Host {
-                        id: format!("cfg:{alias}"),
-                        name: alias.clone(),
-                        source: HostSource::App,
-                        hostname: e.hostname.clone().unwrap_or_else(|| alias.clone()),
-                        port: e.port.or(r.port).unwrap_or(22),
-                        user: e.user.clone(),
-                        identity_files: e.identity_files.iter().map(PathBuf::from).collect(),
-                        proxy_jump: e.proxy_jump.clone(),
-                        group: meta.group,
-                        tags: meta.tags,
-                        tailscale: None,
-                    });
-                }
-                None => cfg_hosts.push(Host {
-                    id: format!("cfg:{alias}"),
-                    name: alias.clone(),
-                    source: HostSource::SshConfig,
-                    hostname: r.hostname,
-                    port: r.port.unwrap_or(22),
-                    user: r.user,
-                    identity_files: r.identity_files,
-                    proxy_jump: r.proxy_jump,
-                    group: None,
-                    tags: Vec::new(),
-                    tailscale: None,
-                }),
-            }
+            let meta = self
+                .meta
+                .host_meta
+                .get(&alias.to_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            cfg_hosts.push(Host {
+                id: format!("cfg:{alias}"),
+                name: alias.clone(),
+                source: HostSource::SshConfig,
+                hostname: r.hostname.clone(),
+                port: r.port.unwrap_or(22),
+                user: r.user.clone(),
+                identity_files: r.identity_files.clone(),
+                proxy_jump: r.proxy_jump.clone(),
+                group: meta.group,
+                tags: meta.tags,
+                config: self.config_info(alias, &r),
+                tailscale: None,
+            });
             push(r.warnings);
         }
-        app_hosts.sort_by_cached_key(|h| {
-            (
-                h.group.as_ref().map(|g| g.to_lowercase()),
-                h.name.to_lowercase(),
-            )
-        });
 
         let mut ts_hosts = Vec::new();
         if let Some(tailnet) = &self.tailnet {
@@ -589,13 +668,51 @@ impl HostStore {
             }
         }
 
-        self.hosts = cfg_hosts
-            .into_iter()
-            .chain(app_hosts)
-            .chain(ts_hosts)
-            .collect();
+        self.hosts = cfg_hosts.into_iter().chain(ts_hosts).collect();
         self.cfg_forwards = cfg_forwards;
         self.warnings = warnings;
+    }
+
+    /// Where `alias` is defined, and whether (and what) Patchbay can edit.
+    fn config_info(&self, alias: &str, r: &ResolvedHost) -> Option<ConfigInfo> {
+        let origin = self.config.alias_origin(alias)?;
+        let file = self.files.get(&origin.file);
+        let entry = file.and_then(|f| f.file.get(alias));
+        let read_only = if origin.patterns.len() > 1 {
+            Some(format!(
+                "It shares its Host line with other names (Host {}).",
+                origin.patterns.join(" ")
+            ))
+        } else if origin.nested {
+            Some("Its file is included from inside a Host or Match block.".to_owned())
+        } else if let Some(problem) = file.and_then(|f| f.problem.as_ref()) {
+            Some(format!(
+                "{} can't be changed: {problem}.",
+                self.display(&origin.file)
+            ))
+        } else if entry.is_none() {
+            Some("Patchbay can't edit its Host line.".to_owned())
+        } else {
+            None
+        };
+        let written = match (&read_only, entry) {
+            (None, Some(e)) => WrittenOptions {
+                hostname: e.hostname,
+                port: e.port,
+                user: e.user,
+                identity_files: e.identity_files,
+                proxy_jump: e.proxy_jump,
+            },
+            _ => WrittenOptions::default(),
+        };
+        Some(ConfigInfo {
+            overridden: overridden(&written, r),
+            file: origin.file.clone(),
+            line: origin.line,
+            read_only,
+            written,
+            visible_to_ssh: origin.file != self.fallback_path || self.fallback_included,
+        })
     }
 
     fn tailscale_host(&self, d: &TailscaleDevice) -> Host {
@@ -634,6 +751,7 @@ impl HostStore {
             proxy_jump: r.proxy_jump,
             group: None,
             tags: Vec::new(),
+            config: None,
             tailscale: Some(TailscaleInfo {
                 online: d.online,
                 os: d.os.clone(),
@@ -807,12 +925,12 @@ fn non_empty(s: Option<String>) -> Option<String> {
 
 fn validate(draft: HostDraft, home: &Path) -> Result<(Entry, HostMeta)> {
     let alias = draft.name.trim().to_owned();
-    managed::valid_alias(&alias).map_err(|e| Error::Other(e.into()))?;
-    let hostname = draft.hostname.trim().to_owned();
-    if hostname.is_empty() {
-        return Err(Error::Other("Hostname must not be empty".into()));
-    }
-    if hostname.contains(char::is_whitespace) {
+    config_file::valid_alias(&alias).map_err(|e| Error::Other(e.into()))?;
+    let hostname = non_empty(Some(draft.hostname));
+    if hostname
+        .as_deref()
+        .is_some_and(|h| h.contains(char::is_whitespace))
+    {
         return Err(Error::Other("Hostname must not contain spaces".into()));
     }
     if draft.port == Some(0) {
@@ -833,16 +951,9 @@ fn validate(draft: HostDraft, home: &Path) -> Result<(Entry, HostMeta)> {
             parse_hop(hop)?;
         }
     }
-    let mut tags: Vec<String> = Vec::new();
-    for t in draft.tags {
-        let t = t.trim().to_owned();
-        if !t.is_empty() && !tags.contains(&t) {
-            tags.push(t);
-        }
-    }
     let entry = Entry {
         alias,
-        hostname: Some(hostname),
+        hostname,
         port: draft.port,
         user,
         identity_files: draft
@@ -853,11 +964,43 @@ fn validate(draft: HostDraft, home: &Path) -> Result<(Entry, HostMeta)> {
             .collect(),
         proxy_jump,
     };
-    let meta = HostMeta {
-        group: non_empty(draft.group),
-        tags,
+    Ok((entry, HostMeta::new(draft.group, draft.tags)))
+}
+
+/// Sentences about the `written` options ssh ignores because an earlier
+/// block already set them (`r` is what ssh uses).
+fn overridden(written: &WrittenOptions, r: &ResolvedHost) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut check = |option: &str, mine: Option<&str>, used: Option<&str>| {
+        // Values with %tokens or ${VARS} expand, so they can't be compared.
+        if let Some(mine) = mine
+            && !mine.contains(['%', '$'])
+            && used != Some(mine)
+        {
+            out.push(match used {
+                Some(used) => format!(
+                    "ssh uses {option} {used} from an earlier block in your SSH config, not {mine}."
+                ),
+                None => format!(
+                    "ssh ignores {option} here: an earlier block in your SSH config sets ProxyCommand."
+                ),
+            });
+        }
     };
-    Ok((entry, meta))
+    check("HostName", written.hostname.as_deref(), Some(&r.hostname));
+    check("User", written.user.as_deref(), r.user.as_deref());
+    let port = r.port.unwrap_or(22).to_string();
+    check(
+        "Port",
+        written.port.map(|p| p.to_string()).as_deref(),
+        Some(&port),
+    );
+    check(
+        "ProxyJump",
+        written.proxy_jump.as_deref(),
+        r.proxy_jump.as_deref(),
+    );
+    out
 }
 
 /// `~/...` for paths in the home directory (so the file works on other
@@ -1039,6 +1182,10 @@ mod tests {
         fn store(&self) -> HostStore {
             HostStore::load_with_env(self.cfg.clone(), self.app.clone(), self.env()).unwrap()
         }
+
+        fn config(&self) -> String {
+            fs::read_to_string(&self.cfg).unwrap()
+        }
     }
 
     fn draft(name: &str, hostname: &str) -> HostDraft {
@@ -1049,31 +1196,38 @@ mod tests {
         }
     }
 
+    fn info(store: &HostStore, id: &str) -> ConfigInfo {
+        store.get(id).unwrap().config.unwrap()
+    }
+
     #[test]
-    fn lists_config_then_sorted_app_hosts() {
+    fn new_hosts_go_before_pattern_blocks() {
         let fx = Fixture::new(
             "Host web db\n  HostName %h.example.com\n  User ops\nHost *\n  Port 2222\n  IdentityFile ~/.ssh/k\n",
         );
         let mut store = fx.store();
+        assert_eq!(store.new_host_file(), fx.cfg);
         store
             .create(HostDraft {
                 group: Some("prod".into()),
                 ..draft("zeta", "z.example")
             })
             .unwrap();
-        store.create(draft("Beta", "b.example")).unwrap();
-        store.create(draft("alpha", "a.example")).unwrap();
         store
             .create(HostDraft {
-                group: Some("prod".into()),
                 port: Some(22),
                 ..draft("eta", "e.example")
             })
             .unwrap();
+        assert_eq!(
+            fx.config(),
+            "Host web db\n  HostName %h.example.com\n  User ops\n\nHost zeta\n  HostName z.example\n\n\
+             Host eta\n  HostName e.example\n  Port 22\n\nHost *\n  Port 2222\n  IdentityFile ~/.ssh/k\n"
+        );
 
         let list = store.list();
         let names: Vec<_> = list.iter().map(|h| h.name.as_str()).collect();
-        assert_eq!(names, ["web", "db", "alpha", "Beta", "eta", "zeta"]);
+        assert_eq!(names, ["web", "db", "zeta", "eta"]);
         let web = &list[0];
         assert_eq!(web.id, "cfg:web");
         assert_eq!(web.source, HostSource::SshConfig);
@@ -1081,11 +1235,15 @@ mod tests {
         assert_eq!(web.port, 2222);
         assert_eq!(web.user.as_deref(), Some("ops"));
         assert_eq!(web.identity_files, vec![fx.home.join(".ssh/k")]);
-        assert_eq!(list[2].port, 2222);
-        assert_eq!(list[4].port, 22);
-        assert_eq!(list[2].id, "cfg:alpha");
-        assert_eq!(list[2].source, HostSource::App);
-        assert_eq!(store.get("cfg:db").unwrap().hostname, "db.example.com");
+        let zeta = &list[2];
+        assert_eq!((zeta.port, zeta.group.as_deref()), (2222, Some("prod")));
+        assert_eq!(list[3].port, 22);
+        let c = zeta.config.as_ref().unwrap();
+        assert_eq!((c.file.as_path(), c.line), (fx.cfg.as_path(), 5));
+        assert_eq!(c.read_only, None);
+        assert_eq!(c.written.hostname.as_deref(), Some("z.example"));
+        assert_eq!(c.written.port, None);
+        assert!(c.visible_to_ssh);
     }
 
     #[test]
@@ -1104,12 +1262,11 @@ mod tests {
         assert_eq!(h.name, "box");
         assert_eq!(h.user, None);
         assert_eq!(h.tags, ["a", "b"]);
-        assert_eq!(h.identity_files, [PathBuf::from("~/.ssh/id_box")]);
-
-        let conf = fs::read_to_string(&fx.conf).unwrap();
-        assert!(
-            conf.ends_with("\nHost box\n    HostName box.lan\n    IdentityFile ~/.ssh/id_box\n"),
-            "{conf}"
+        assert_eq!(h.identity_files, [fx.home.join(".ssh/id_box")]);
+        assert_eq!(h.config.unwrap().written.identity_files, ["~/.ssh/id_box"]);
+        assert_eq!(
+            fx.config(),
+            "Host box\n    HostName box.lan\n    IdentityFile ~/.ssh/id_box\n"
         );
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&fx.app).unwrap()).unwrap();
@@ -1117,29 +1274,32 @@ mod tests {
         assert_eq!(json["hostMeta"]["box"]["tags"][1], "b");
         let leftovers = |dir: &Path| fs::read_dir(dir).unwrap().count();
         assert_eq!(leftovers(fx.app.parent().unwrap()), 1);
-        assert_eq!(leftovers(&fx.home.join(".ssh")), 2);
+        assert_eq!(leftovers(&fx.home.join(".ssh")), 1);
 
         let mut again = fx.store();
-        assert_eq!(again.get(&h.id).unwrap(), h);
+        assert_eq!(again.get("cfg:box"), store.get("cfg:box"));
         let updated = again
             .update(
-                &h.id,
+                "cfg:box",
                 HostDraft {
                     port: Some(2200),
-                    ..draft("box2", "box.lan")
+                    ..draft("box2", "")
                 },
             )
             .unwrap();
         assert_eq!(updated.id, "cfg:box2");
         assert_eq!(updated.port, 2200);
+        assert_eq!(updated.hostname, "box2");
         assert!(updated.tags.is_empty());
         assert_eq!(again.renamed().get("cfg:box").unwrap(), "cfg:box2");
+        assert_eq!(fx.config(), "Host box2\n    Port 2200\n");
         store.reload().unwrap();
-        assert!(store.get(&h.id).is_none());
+        assert!(store.get("cfg:box").is_none());
         assert_eq!(store.get("cfg:box2").unwrap().port, 2200);
 
         store.delete("cfg:box2").unwrap();
         assert!(fx.store().list().is_empty());
+        assert_eq!(fx.config(), "");
         assert!(matches!(
             store.delete("cfg:box2"),
             Err(Error::UnknownHost(_))
@@ -1147,12 +1307,106 @@ mod tests {
     }
 
     #[test]
-    fn validation_and_read_only() {
+    fn edits_keep_the_rest_of_the_file() {
+        let text = "# My hosts\nHost web\n  # the old box\n  HostName web.old\n  ForwardAgent yes\n\n\
+                    Host db\n  HostName db.lan\n";
+        let fx = Fixture::new(text);
+        let mut store = fx.store();
+        let mut d = draft("web", "web.new");
+        d.user = Some("me".into());
+        store.update("cfg:web", d).unwrap();
+        assert_eq!(
+            fx.config(),
+            "# My hosts\nHost web\n  # the old box\n  HostName web.new\n  ForwardAgent yes\n  User me\n\n\
+             Host db\n  HostName db.lan\n"
+        );
+        store.delete("cfg:web").unwrap();
+        assert_eq!(fx.config(), "# My hosts\n\nHost db\n  HostName db.lan\n");
+    }
+
+    #[test]
+    fn read_only_hosts_say_why() {
+        let fx = Fixture::new(
+            "Include conf.d/*\nHost a b\n  User x\nHost c\n  Include nested\nMatch host d\n  User y\nHost d\n",
+        );
+        let ssh = fx.home.join(".ssh");
+        fs::create_dir(ssh.join("conf.d")).unwrap();
+        fs::write(ssh.join("conf.d/work"), "Host e\n  HostName e.corp\n").unwrap();
+        fs::write(ssh.join("nested"), "Host f\n").unwrap();
+        let mut store = fx.store();
+        let reason = |id: &str| info(&store, id).read_only;
+        assert!(reason("cfg:a").unwrap().contains("(Host a b)"));
+        assert!(reason("cfg:b").is_some());
+        assert_eq!(reason("cfg:c"), None);
+        assert_eq!(reason("cfg:d"), None);
+        // Hosts in included files are edited where they are.
+        assert_eq!(reason("cfg:e"), None);
+        assert_eq!(info(&store, "cfg:e").file, ssh.join("conf.d/work"));
+        assert!(reason("cfg:f").unwrap().contains("included from inside"));
+        assert_eq!(info(&store, "cfg:a").written, WrittenOptions::default());
+
+        for id in ["cfg:a", "cfg:f"] {
+            assert!(matches!(
+                store.update(id, draft("x", "h")),
+                Err(Error::ReadOnlyHost(_))
+            ));
+            assert!(matches!(store.delete(id), Err(Error::ReadOnlyHost(_))));
+        }
+        store.update("cfg:e", draft("e", "e2.corp")).unwrap();
+        assert_eq!(
+            fs::read_to_string(ssh.join("conf.d/work")).unwrap(),
+            "Host e\n  HostName e2.corp\n"
+        );
+
+        // Groups and tags work for every config host.
+        let a = store
+            .organize("cfg:a", Some(" Work ".into()), vec!["x".into()])
+            .unwrap();
+        assert_eq!(
+            (a.group.as_deref(), a.tags.as_slice()),
+            (Some("Work"), &["x".to_owned()][..])
+        );
+        assert_eq!(
+            fx.store().get("cfg:a").unwrap().group.as_deref(),
+            Some("Work")
+        );
+        assert!(fx.config().starts_with("Include conf.d/*\nHost a b\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_config_uses_patchbay_conf() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = Fixture::new("Host web\n");
+        fs::set_permissions(&fx.cfg, fs::Permissions::from_mode(0o444)).unwrap();
+        if fs::OpenOptions::new().append(true).open(&fx.cfg).is_ok() {
+            return; // root
+        }
+        let mut store = fx.store();
+        assert!(
+            info(&store, "cfg:web")
+                .read_only
+                .unwrap()
+                .contains("read-only")
+        );
+        assert_eq!(store.new_host_file(), fx.conf);
+        store.create(draft("box", "box.lan")).unwrap();
+        assert_eq!(fx.config(), "Host web\n");
+        let c = info(&store, "cfg:box");
+        assert_eq!(c.file, fx.conf);
+        assert_eq!(c.read_only, None);
+        assert!(!c.visible_to_ssh);
+        // Not moved while ~/.ssh/config can't be written.
+        assert!(fx.store().get("cfg:box").is_some());
+        assert!(fx.conf.exists());
+    }
+
+    #[test]
+    fn validation() {
         let fx = Fixture::new("Host cfg1\n");
         let mut store = fx.store();
         for bad in [
             draft("", "h"),
-            draft("n", " "),
             draft("n", "a b"),
             HostDraft {
                 port: Some(0),
@@ -1170,15 +1424,23 @@ mod tests {
             assert!(matches!(store.create(bad), Err(Error::Other(_))));
         }
         assert!(!fx.app.exists());
-        assert!(!fx.conf.exists());
-        assert!(matches!(
-            store.update("cfg:cfg1", draft("n", "h")),
-            Err(Error::ReadOnlyHost(_))
-        ));
-        assert!(matches!(
-            store.delete("cfg:cfg1"),
-            Err(Error::ReadOnlyHost(_))
-        ));
+        assert_eq!(fx.config(), "Host cfg1\n");
+    }
+
+    #[test]
+    fn overridden_options_are_reported() {
+        let fx = Fixture::new(
+            "Host *.lan\n  User lanuser\nHost box.lan\n  User me\n  Port 2\n  HostName %h\n\
+             Host other\n  User me\n",
+        );
+        let store = fx.store();
+        let c = info(&store, "cfg:box.lan");
+        assert_eq!(c.written.user.as_deref(), Some("me"));
+        assert_eq!(
+            c.overridden,
+            ["ssh uses User lanuser from an earlier block in your SSH config, not me."]
+        );
+        assert!(info(&store, "cfg:other").overridden.is_empty());
     }
 
     #[test]
@@ -1244,7 +1506,7 @@ mod tests {
     }
 
     #[test]
-    fn app_host_falls_back_to_config() {
+    fn new_host_falls_back_to_patterns() {
         // Like `ssh <alias>`: blocks match the alias, not the HostName.
         let fx = Fixture::new(
             "Host *.corp\n  User corpuser\nHost inh*\n  Port 2200\n\
@@ -1270,6 +1532,7 @@ mod tests {
                 ..draft("inh2", "srv.corp")
             })
             .unwrap();
+        assert!(explicit.config.unwrap().overridden.is_empty());
         let t = store.resolve_target(&explicit.id).unwrap();
         assert_eq!(t.user, "me");
         assert_eq!(t.port, 2);
@@ -1284,7 +1547,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_schema_1_hosts_to_patchbay_conf() {
+    fn migrates_schema_1_hosts_to_ssh_config() {
         let fx = Fixture::new("Host web\n  HostName web.example\n");
         fs::create_dir_all(fx.app.parent().unwrap()).unwrap();
         let v1 = serde_json::json!({
@@ -1301,11 +1564,10 @@ mod tests {
 
         let store = fx.store();
         let names: Vec<_> = store.list().iter().map(|h| h.id.clone()).collect();
-        assert_eq!(names, ["cfg:web", "cfg:web-2", "cfg:My-box"]);
+        assert_eq!(names, ["cfg:web", "cfg:My-box", "cfg:web-2"]);
         let boxed = store.get("cfg:My-box").unwrap();
-        assert_eq!(boxed.source, HostSource::App);
         assert_eq!((boxed.port, boxed.user.as_deref()), (2200, Some("me")));
-        assert_eq!(boxed.identity_files, [PathBuf::from("~/.ssh/k")]);
+        assert_eq!(boxed.identity_files, [fx.home.join(".ssh/k")]);
         assert_eq!(boxed.group.as_deref(), Some("Home"));
         assert_eq!(boxed.tags, ["nas"]);
         let t = store.resolve_target(&boxed.id).unwrap();
@@ -1317,13 +1579,54 @@ mod tests {
         // Loading again doesn't migrate twice.
         let again = fx.store();
         assert_eq!(again.list(), store.list());
-        let conf = fs::read_to_string(&fx.conf).unwrap();
-        assert_eq!(conf.matches("Host ").count(), 2, "{conf}");
+        assert_eq!(fx.config().matches("Host ").count(), 3, "{}", fx.config());
+    }
+
+    #[test]
+    fn migrates_patchbay_conf_into_ssh_config() {
+        let fx = Fixture::new(
+            "# Added by Patchbay: lets ssh use the hosts saved in Patchbay.\nInclude patchbay.conf\n\n\
+             Host web\n  User u\n\nHost *\n  ServerAliveInterval 5\n",
+        );
+        fs::write(
+            &fx.conf,
+            "# Hosts saved in Patchbay.\n\
+             # You can edit this file: Patchbay only rewrites the HostName, User, Port,\n\
+             # IdentityFile and ProxyJump lines of the hosts you change in the app.\n\n\
+             Host box\n    HostName box.lan\n    ForwardAgent yes\n",
+        )
+        .unwrap();
+        let store = fx.store();
+        assert_eq!(
+            fx.config(),
+            "Host web\n  User u\n\nHost box\n    HostName box.lan\n    ForwardAgent yes\n\n\
+             Host *\n  ServerAliveInterval 5\n"
+        );
+        assert!(!fx.conf.exists());
+        assert!(fx.conf.with_extension("conf.bak").exists());
+        let c = info(&store, "cfg:box");
+        assert_eq!((c.file, c.read_only), (fx.cfg.clone(), None));
+        assert_eq!(fx.store().list(), store.list());
+
+        // Not included (the user said "not now"): moved all the same.
+        let fx = Fixture::new("");
+        fs::write(&fx.conf, "Host box\n    HostName box.lan\n").unwrap();
+        fx.store();
+        assert_eq!(fx.config(), "Host box\n    HostName box.lan\n");
+
+        // An interrupted move (config written, file not renamed) isn't
+        // repeated.
+        let fx = Fixture::new("Host box\n    HostName box.lan\n");
+        fs::write(&fx.conf, "Host box\n    HostName box.lan\n").unwrap();
+        fx.store();
+        assert_eq!(fx.config(), "Host box\n    HostName box.lan\n");
+        assert!(!fx.conf.exists());
     }
 
     #[test]
     fn renames_follow_references() {
         let fx = Fixture::new("");
+        let ssh = fx.home.join(".ssh");
         let mut store = fx.store();
         store.create(draft("bastion", "b.example")).unwrap();
         let target = store
@@ -1332,11 +1635,21 @@ mod tests {
                 ..draft("target", "t.example")
             })
             .unwrap();
+        fs::write(ssh.join("work"), "Host w\n  ProxyJump bastion\n").unwrap();
+        let mut cfg = fx.config();
+        cfg.insert_str(0, "Include work\n\n");
+        fs::write(&fx.cfg, cfg).unwrap();
+        store.reload().unwrap();
+
         store
             .update("cfg:bastion", draft("gw", "b.example"))
             .unwrap();
         let jump = |store: &HostStore| store.get(&target.id).unwrap().proxy_jump.unwrap();
         assert_eq!(jump(&store), "u@gw:2,x");
+        assert_eq!(
+            fs::read_to_string(ssh.join("work")).unwrap(),
+            "Host w\n  ProxyJump gw\n"
+        );
         store.update("cfg:gw", draft("gw2", "b.example")).unwrap();
         assert_eq!(jump(&store), "u@gw2:2,x");
         let renamed: Vec<_> = store
@@ -1355,55 +1668,13 @@ mod tests {
     }
 
     #[test]
-    fn hand_edits_to_patchbay_conf_are_kept() {
-        let fx = Fixture::new("");
-        fs::write(
-            &fx.conf,
-            "# notes\nHost *.lan\n  User lan\n\nHost box\n  HostName box.lan\n  ForwardAgent yes\n",
-        )
-        .unwrap();
+    fn edits_to_a_changed_file_fail() {
+        let fx = Fixture::new("Host box\n");
         let mut store = fx.store();
-        let ids: Vec<_> = store.list().iter().map(|h| h.id.clone()).collect();
-        assert_eq!(ids, ["cfg:box"]);
-        store
-            .update(
-                "cfg:box",
-                HostDraft {
-                    user: Some("me".into()),
-                    ..draft("box", "box.lan")
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            fs::read_to_string(&fx.conf).unwrap(),
-            "# notes\nHost *.lan\n  User lan\n\nHost box\n    HostName box.lan\n    User me\n  \
-             ForwardAgent yes\n"
-        );
-    }
-
-    #[test]
-    fn sharing_with_ssh_adds_the_include_line() {
-        let fx = Fixture::new("Host web\n  User u\n");
-        let mut store = fx.store();
-        store.create(draft("box", "box.lan")).unwrap();
-        assert!(!store.shared_with_ssh());
-        let before = store.list();
-
-        store.set_shared_with_ssh(true).unwrap();
-        assert!(store.shared_with_ssh());
-        let cfg = fs::read_to_string(&fx.cfg).unwrap();
-        assert!(
-            cfg.contains("\nInclude patchbay.conf\n\nHost web\n"),
-            "{cfg}"
-        );
-        assert_eq!(store.list(), before);
-        assert_eq!(store.get("cfg:box").unwrap().source, HostSource::App);
-        assert!(fx.store().shared_with_ssh());
-
-        store.set_shared_with_ssh(false).unwrap();
-        assert!(!store.shared_with_ssh());
-        assert_eq!(fs::read_to_string(&fx.cfg).unwrap(), "Host web\n  User u\n");
-        assert_eq!(store.list(), before);
+        fs::write(&fx.cfg, "Host other\n").unwrap();
+        let err = store.update("cfg:box", draft("box", "b")).unwrap_err();
+        assert!(err.to_string().contains("changed on disk"), "{err}");
+        assert_eq!(fx.config(), "Host other\n");
     }
 
     fn device(id: &str, name: &str) -> TailscaleDevice {

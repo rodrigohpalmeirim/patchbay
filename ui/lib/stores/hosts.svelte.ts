@@ -1,4 +1,4 @@
-import type { Host, HostDraft, HostId, SshSharing } from "../types";
+import type { Host, HostDraft, HostId } from "../types";
 import { collator } from "../util/format";
 import { attempt, call } from "./backend";
 
@@ -9,8 +9,8 @@ class Hosts {
   reloading = $state(false);
   /** Old id -> current id of renamed hosts. */
   renamed = $state<Record<HostId, HostId>>({});
-  /** Whether ~/.ssh/config includes patchbay.conf (null until loaded). */
-  sharing = $state<SshSharing | null>(null);
+  /** Where new hosts are added (null until loaded). */
+  newHostFile = $state<string | null>(null);
 
   byId = $derived(new Map(this.list.map((h) => [h.id, h])));
   /** Lower-cased alias -> ssh_config host, for resolving ProxyJump hops. */
@@ -37,24 +37,17 @@ class Hosts {
   }
 
   async refresh() {
-    const [list, warnings, renamed, sharing] = await Promise.all([
+    const [list, warnings, renamed, newHostFile] = await Promise.all([
       attempt((b) => b.listHosts(), { action: "Couldn't load hosts" }),
       attempt((b) => b.hostWarnings(), { toast: false }),
       attempt((b) => b.hostRenames(), { toast: false }),
-      attempt((b) => b.sshSharing(), { toast: false }),
+      attempt((b) => b.newHostFile(), { toast: false }),
     ]);
     if (list) this.list = list;
     if (warnings) this.warnings = warnings;
     if (renamed) this.renamed = renamed;
-    if (sharing) this.sharing = sharing;
+    if (newHostFile) this.newHostFile = newHostFile;
     this.loaded = true;
-  }
-
-  /** Adds or removes `Include patchbay.conf` in ~/.ssh/config. */
-  async setSharing(shared: boolean): Promise<boolean> {
-    const sharing = await attempt((b) => b.setSshSharing(shared), { action: "Couldn't update ~/.ssh/config" });
-    if (sharing) this.sharing = sharing;
-    return !!sharing;
   }
 
   /** Re-reads ~/.ssh/config from disk. */
@@ -77,13 +70,20 @@ class Hosts {
     return host;
   }
 
-  /** Saves a Patchbay host; renaming it changes its id (see `renamed`). */
+  /** Saves a host in its config file; renaming it changes its id (see `renamed`). */
   async update(id: HostId, draft: HostDraft): Promise<Host> {
     const host = await call((b) => b.updateHost(id, draft), { toast: false });
     if (host.id !== id) {
       this.renamed = { ...this.renamed, [id]: host.id };
       this.list = this.list.filter((h) => h.id !== id);
     }
+    this.#upsert(host);
+    return host;
+  }
+
+  /** Sets the group and tags of a config host (read-only ones too). */
+  async organize(id: HostId, group: string | null, tags: string[]): Promise<Host> {
+    const host = await call((b) => b.organizeHost(id, group, tags), { toast: false });
     this.#upsert(host);
     return host;
   }

@@ -6,12 +6,14 @@ export function address(host: Pick<Host, "user" | "hostname" | "port">): string 
   return host.port && host.port !== 22 ? `${base}:${host.port}` : base;
 }
 
-/**
- * An equivalent `ssh` command line, for copying. `shared`: ssh sees the hosts
- * saved in Patchbay (~/.ssh/config includes patchbay.conf).
- */
-export function sshCommand(host: Host, shared = false): string {
-  if (host.source === "sshConfig" || (host.source === "app" && shared)) return `ssh ${host.name}`;
+/** Whether Patchbay can edit the host's block in its ssh_config file. */
+export function isEditable(host: Host): boolean {
+  return !!host.config && !host.config.readOnly;
+}
+
+/** An equivalent `ssh` command line, for copying. */
+export function sshCommand(host: Host): string {
+  if (host.config?.visibleToSsh) return `ssh ${host.name}`;
   // ssh applies ~/.ssh/config to the MagicDNS name itself.
   if (host.source === "tailscale") return `ssh ${host.user ? `${host.user}@` : ""}${host.hostname}`;
   const parts = ["ssh"];

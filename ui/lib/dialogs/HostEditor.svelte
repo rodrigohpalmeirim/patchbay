@@ -1,15 +1,21 @@
-<!-- Create / edit an app-managed host, or view a read-only ssh_config host. -->
+<!--
+  Create / edit an ssh_config host, or view one Patchbay can't edit (and set
+  its group and tags) or a Tailscale device.
+-->
 <script lang="ts">
   import CopyPlus from "@lucide/svelte/icons/copy-plus";
-  import FileText from "@lucide/svelte/icons/file-text";
+  import ExternalLink from "@lucide/svelte/icons/external-link";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
+  import Lock from "@lucide/svelte/icons/lock";
   import Network from "@lucide/svelte/icons/network";
   import Plus from "@lucide/svelte/icons/plus";
   import Save from "@lucide/svelte/icons/save";
   import Server from "@lucide/svelte/icons/server";
+  import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
   import X from "@lucide/svelte/icons/x";
   import { tick, untrack } from "svelte";
-  import { duplicateHost, maybeOfferSshSharing } from "../actions";
+  import { duplicateHost } from "../actions";
+  import { attempt } from "../stores/backend";
   import { isTauri } from "../api";
   import ChipInput from "../components/ChipInput.svelte";
   import Combobox from "../components/Combobox.svelte";
@@ -22,7 +28,7 @@
   import { ui, type EditorState } from "../stores/ui.svelte";
   import type { HostDraft } from "../types";
   import { toCommandError, sentence } from "../util/errors";
-  import { address, jumpHops } from "../util/format";
+  import { address, jumpHops, tildify } from "../util/format";
 
   let { editor }: { editor: EditorState } = $props();
 
@@ -41,12 +47,26 @@
   }
 
   function initialForm(): Form {
-    const src: Partial<HostDraft> =
-      editor.mode === "create" ? (editor.initial ?? {}) : (hosts.get(editor.hostId) ?? {});
+    // Existing hosts: what their block says (not what ssh ends up using).
+    let src: Partial<HostDraft> = {};
+    if (editor.mode === "create") src = editor.initial ?? {};
+    else {
+      const host = hosts.get(editor.hostId);
+      const written = host?.config?.written;
+      if (host)
+        src = {
+          ...written,
+          hostname: written?.hostname ?? "",
+          identityFiles: written?.identityFiles ?? [],
+          name: host.name,
+          group: host.group,
+          tags: host.tags,
+        };
+    }
     return {
       name: src.name ?? "",
       hostname: src.hostname ?? "",
-      port: src.port && src.port !== 22 ? String(src.port) : "",
+      port: src.port ? String(src.port) : "",
       user: src.user ?? "",
       identityFiles: [...(src.identityFiles ?? [])],
       proxyJump: src.proxyJump ?? "",
@@ -77,7 +97,8 @@
       if (clash && clash.id !== selfId) e.name = `Another host is already called “${clash.name}”.`;
     }
     const hostname = form.hostname.trim();
-    if (!hostname) e.hostname = "Enter a hostname or IP address.";
+    // An existing block may leave HostName out (ssh then uses the name).
+    if (!hostname && editor.mode === "create") e.hostname = "Enter a hostname or IP address.";
     else if (/\s/.test(hostname)) e.hostname = "Hostnames can’t contain spaces.";
     else if (hostname.includes("@")) e.hostname = "Put the user name in the User field.";
     const port = form.port.trim();
@@ -133,19 +154,18 @@
     saving = true;
     try {
       const draft = toDraft();
+      const host = editor.mode === "edit" ? await hosts.update(editor.hostId, draft) : await hosts.create(draft);
       if (editor.mode === "edit") {
-        const host = await hosts.update(editor.hostId, draft);
         if (host.id !== editor.hostId) {
           tabs.retarget((id) => hosts.currentId(id));
           connections.forget(editor.hostId);
         }
-        toasts.success(`Saved ${host.name}`);
       } else {
-        const host = await hosts.create(draft);
         tabs.openHost(host.id);
-        toasts.success(`Added ${host.name}`);
-        maybeOfferSshSharing();
       }
+      const ignored = host.config?.overridden ?? [];
+      if (ignored.length) toasts.show("info", `Saved ${host.name}, but ssh ignores part of it`, ignored.join(" "));
+      else toasts.success(editor.mode === "edit" ? `Saved ${host.name}` : `Added ${host.name}`);
       ui.editor = null;
     } catch (err) {
       saveError = sentence(toCommandError(err).message);
@@ -197,6 +217,48 @@
     if (existing) duplicateHost(existing);
   }
 
+  /** Read-only hosts: saves just the group and tags. */
+  async function saveOrganization(e: SubmitEvent) {
+    e.preventDefault();
+    if (!existing || !dirty) {
+      ui.editor = null;
+      return;
+    }
+    saving = true;
+    saveError = null;
+    try {
+      await hosts.organize(existing.id, form.group.trim() || null, form.tags);
+      ui.editor = null;
+    } catch (err) {
+      saveError = sentence(toCommandError(err).message);
+    } finally {
+      saving = false;
+    }
+  }
+
+  function openFile() {
+    if (existing) void attempt((b) => b.openHostFile(existing.id), { action: "Couldn't open the file" });
+  }
+
+  /** What ssh uses when a field is left empty, for placeholders. */
+  const inherited = $derived.by(() => {
+    if (editor.mode !== "edit" || !existing) return null;
+    const w = existing.config?.written;
+    return {
+      user: !w?.user && existing.user ? existing.user : null,
+      port: !w?.port && existing.port !== 22 ? String(existing.port) : null,
+      identityFiles: !w?.identityFiles.length && existing.identityFiles.length ? existing.identityFiles : null,
+      proxyJump: !w?.proxyJump && existing.proxyJump ? existing.proxyJump : null,
+    };
+  });
+  const savedIn = $derived(
+    editor.mode === "create"
+      ? tildify(hosts.newHostFile ?? "~/.ssh/config")
+      : existing?.config
+        ? `${tildify(existing.config.file)}, line ${existing.config.line}`
+        : null,
+  );
+
   const title = $derived(
     editor.mode === "create" ? "Add host" : editor.mode === "edit" ? `Edit ${existing?.name ?? "host"}` : (existing?.name ?? "Host"),
   );
@@ -232,25 +294,49 @@
       <button type="button" class="btn btn-primary" onclick={duplicate}><Save size={14} /> Save as host</button>
     </div>
   {:else if readOnly && existing}
-    <div class="dialog-header">
-      <span class="dialog-icon"><FileText size={18} /></span>
-      <div>
-        <h2 class="dialog-title" id="editor-title">{existing.name}</h2>
-        <p class="dialog-subtitle">Defined in <code>~/.ssh/config</code></p>
+    <form class="editor" onsubmit={saveOrganization} novalidate>
+      <div class="dialog-header">
+        <span class="dialog-icon"><Lock size={18} /></span>
+        <div>
+          <h2 class="dialog-title" id="editor-title">{existing.name}</h2>
+          <p class="dialog-subtitle">Read-only · {savedIn}</p>
+        </div>
       </div>
-    </div>
-    <div class="dialog-body">
-      <p class="readonly-note">
-        Hosts you wrote in your SSH config are read-only in Patchbay. Edit <code>~/.ssh/config</code> to change this one, or
-        duplicate it as a Patchbay host you can edit here.
-      </p>
-      <HostDetails host={existing} linkHops={false} />
-    </div>
-    <div class="dialog-footer">
-      <span class="spacer"></span>
-      <button type="button" class="btn" onclick={() => (ui.editor = null)} data-autofocus>Close</button>
-      <button type="button" class="btn btn-primary" onclick={duplicate}><CopyPlus size={14} /> Duplicate as Patchbay host</button>
-    </div>
+      <div class="dialog-body">
+        <p class="readonly-note">
+          Patchbay can’t edit this host. {existing.config?.readOnly} Change it in the file, or duplicate it to get a copy Patchbay
+          can edit.
+        </p>
+        <HostDetails host={existing} linkHops={false} organization={false} />
+        <div class="group org" role="group" aria-labelledby="g-org-ro">
+          <h3 class="group-title" id="g-org-ro">Organization</h3>
+          <div class="grid">
+            <div class="field span-group">
+              <label for="f-group">Group</label>
+              <Combobox id="f-group" bind:value={form.group} options={hosts.groups} placeholder="No group" />
+            </div>
+            <div class="field span-tags">
+              <label for="f-tags">Tags</label>
+              <ChipInput id="f-tags" bind:values={form.tags} suggestions={hosts.tags} placeholder="Add tags…" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        {#if saveError}
+          <p class="save-error" role="alert">{saveError}</p>
+        {:else if isTauri}
+          <button type="button" class="btn" onclick={openFile}><ExternalLink size={14} /> Open file</button>
+        {/if}
+        <span class="spacer"></span>
+        <button type="button" class="btn" onclick={duplicate}><CopyPlus size={14} /> Duplicate…</button>
+        {#if dirty}
+          <button type="submit" class="btn btn-primary" disabled={saving}>Save</button>
+        {:else}
+          <button type="submit" class="btn btn-primary" data-autofocus>Close</button>
+        {/if}
+      </div>
+    </form>
   {:else}
     <form class="editor" {onsubmit} novalidate>
       <div class="dialog-header">
@@ -258,14 +344,21 @@
         <div>
           <h2 class="dialog-title" id="editor-title">{title}</h2>
           <p class="dialog-subtitle">
-            {editor.mode === "create"
-              ? "Saved in ~/.ssh/patchbay.conf, an SSH config file Patchbay keeps for you."
-              : "Changes apply to the next connection."}
+            {editor.mode === "create" ? `Added to ${savedIn}` : `${savedIn} · changes apply to the next connection`}
           </p>
         </div>
       </div>
 
       <div class="dialog-body">
+        {#if existing?.config?.overridden.length}
+          <div class="callout warning" role="note">
+            <TriangleAlert size={16} />
+            <div class="callout-body">
+              <div class="callout-title">ssh ignores part of this host</div>
+              {#each existing.config.overridden as note (note)}<div class="callout-text">{note}</div>{/each}
+            </div>
+          </div>
+        {/if}
         <div class="group" role="group" aria-labelledby="g-conn">
           <h3 class="group-title" id="g-conn">Connection</h3>
           <div class="grid">
@@ -290,7 +383,7 @@
                 id="f-hostname"
                 class="input mono"
                 bind:value={form.hostname}
-                placeholder="server.example.com or 10.0.0.5"
+                placeholder={editor.mode === "create" ? "server.example.com or 10.0.0.5" : `Same as the name (${form.name.trim() || "name"})`}
                 autocomplete="off"
                 spellcheck="false"
                 aria-invalid={!!show("hostname")}
@@ -304,7 +397,7 @@
                 id="f-port"
                 class="input mono"
                 bind:value={form.port}
-                placeholder="22"
+                placeholder={inherited?.port ?? "22"}
                 inputmode="numeric"
                 autocomplete="off"
                 aria-invalid={!!show("port")}
@@ -318,7 +411,7 @@
                 id="f-user"
                 class="input mono"
                 bind:value={form.user}
-                placeholder="Defaults to your local user name"
+                placeholder={inherited?.user ? `${inherited.user} (from another block)` : "Defaults to your local user name"}
                 autocomplete="off"
                 spellcheck="false"
                 aria-invalid={!!show("user")}
@@ -356,7 +449,13 @@
               {/each}
             </ul>
           {:else}
-            <p class="help files-empty">None — Patchbay will use your SSH agent and default keys.</p>
+            {#if inherited?.identityFiles}
+              <p class="help files-empty">
+                None here — other blocks add {inherited.identityFiles.map((f) => tildify(f)).join(", ")}.
+              </p>
+            {:else}
+              <p class="help files-empty">None — Patchbay will use your SSH agent and default keys.</p>
+            {/if}
           {/if}
           <div class="file-actions">
             <button type="button" class="btn btn-sm" onclick={addFile}><Plus size={13} /> Add path</button>
@@ -378,7 +477,7 @@
                 describe={describeHost}
                 multi
                 mono
-                placeholder="None — connect directly"
+                placeholder={inherited?.proxyJump ? `${inherited.proxyJump} (from another block)` : "None — connect directly"}
                 invalid={!!show("proxyJump")}
                 describedby="f-proxyJump-msg"
               />
@@ -518,6 +617,34 @@
   }
   .save-error + .spacer {
     display: none;
+  }
+  .org {
+    margin-top: 16px;
+  }
+  .callout {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    line-height: 1.4;
+  }
+  .callout :global(svg) {
+    flex: none;
+    margin-top: 2px;
+  }
+  .callout.warning {
+    background: var(--warning-soft);
+    color: var(--warning-text);
+  }
+  .callout-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .callout-title {
+    font-weight: var(--weight-semibold);
   }
   .readonly-note {
     margin-bottom: 8px;

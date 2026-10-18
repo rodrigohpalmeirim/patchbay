@@ -11,7 +11,6 @@
 
   const count = (source: string) => hosts.list.filter((h) => h.source === source).length;
   const cfgCount = $derived(count("sshConfig"));
-  const appCount = $derived(count("app"));
   const tailnetCount = $derived(count("tailscale"));
 </script>
 
@@ -26,7 +25,7 @@
         Pick a host from the sidebar to see its details and connect.
         {#if hosts.loaded}
           <span class="stats">
-            {cfgCount} from <code>~/.ssh/config</code> · {appCount} saved in Patchbay{#if tailnetCount}
+            {cfgCount} in <code>~/.ssh/config</code>{#if tailnetCount}
               · {tailnetCount} on your tailnet{/if}
           </span>
         {/if}

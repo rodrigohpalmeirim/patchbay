@@ -27,16 +27,25 @@ docker/             OpenSSH test containers (target, bastion, SFTP-only, Windows
 
 ## Hosts & connections
 
-- Host list = `~/.ssh/config` (read-only, live-reloaded; supports `Host` patterns,
-  `Include`, `HostName`, `User`, `Port`, `IdentityFile`, `ProxyJump`, `LocalForward`/`RemoteForward`/`DynamicForward`)
-  **plus** the hosts created in Patchbay, plus devices on the user's tailnet.
-- Hosts created in Patchbay are ssh_config hosts too: they live in `~/.ssh/patchbay.conf`, which
-  Patchbay owns but keeps hand edits in (only `HostName`/`User`/`Port`/`IdentityFile`/`ProxyJump`
-  of a `Host <alias>` block are rewritten). With the user's consent, one `Include patchbay.conf`
-  line at the top of `~/.ssh/config` makes them work with `ssh` and other tools; until then Patchbay
-  reads the file as if it were included there. Their name is their ssh alias (`cfg:<alias>` ids;
-  renames are remembered so tabs, forwards and snippets follow). Groups and tags, which ssh_config
-  has no place for, stay in the app config dir. Hand-written hosts in `~/.ssh/config` stay read-only.
+- Host list = `~/.ssh/config` and its includes (live-reloaded; supports `Host` patterns,
+  `Include`, `HostName`, `User`, `Port`, `IdentityFile`, `ProxyJump`, `LocalForward`/`RemoteForward`/`DynamicForward`),
+  plus devices on the user's tailnet. There is no separate Patchbay host store: a host's name is its
+  ssh alias (`cfg:<alias>` ids; renames are remembered so tabs, forwards and snippets follow).
+- Patchbay edits the config in place, with line-level edits: only the `Host` line and the
+  `HostName`/`User`/`Port`/`IdentityFile`/`ProxyJump` lines of the host's own block change (keeping
+  their indentation and spelling); comments, other options and other blocks are untouched. Writes are
+  atomic, follow symlinks (dotfile repos) and keep permissions. A host is editable when its first
+  `Host` line names only it, isn't in a file included from inside a `Host`/`Match` block, and the file
+  can be written; otherwise it is read-only and says why. New hosts go before the first block with
+  patterns (`Host *`, `Host *.lan`, `Match`), since in ssh the first value wins. Values in a host's
+  block that an earlier block overrides are pointed out in the editor. Renames update `ProxyJump`
+  references in the files Patchbay can write.
+- If `~/.ssh/config` can't be written (e.g. managed by Nix), new hosts go to `~/.ssh/patchbay.conf`,
+  which Patchbay reads as if it were included at the top. Patchbay 0.1 kept all its hosts there
+  (with an optional `Include` line); on load they are moved into `~/.ssh/config` and the file is kept
+  as `patchbay.conf.bak`.
+- Groups and tags, which ssh_config has no place for, are kept for every config host in the app
+  config dir (by alias).
 - Tailscale: `tailscale status --json` (polled) lists the tailnet's devices (`ts:<stable node id>`),
   except ones a config host already points at. Their name goes through ssh_config (`Host *.ts.net`
   rules apply); the user comes from ssh_config, else the last one that worked, else the user is asked.

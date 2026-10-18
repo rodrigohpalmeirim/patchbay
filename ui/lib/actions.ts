@@ -23,7 +23,7 @@ import { tabs } from "./stores/tabs.svelte";
 import { toasts } from "./stores/toasts.svelte";
 import { ui, type MenuItem } from "./stores/ui.svelte";
 import type { Host, HostDraft } from "./types";
-import { sshCommand } from "./util/format";
+import { isEditable, sshCommand, tildify } from "./util/format";
 import { writeClipboard } from "./util/clipboard";
 
 export function openHost(host: Host) {
@@ -57,7 +57,7 @@ export function newHost(initial?: Partial<HostDraft>) {
 }
 
 export function editHost(host: Host) {
-  ui.editor = host.source === "app" ? { mode: "edit", hostId: host.id } : { mode: "view", hostId: host.id };
+  ui.editor = isEditable(host) ? { mode: "edit", hostId: host.id } : { mode: "view", hostId: host.id };
 }
 
 /** Asks which user to log in as, then connects (Tailscale devices). */
@@ -66,19 +66,21 @@ export function connectHostAs(host: Host) {
   ui.connectAs = { hostId: host.id, reason: "choose" };
 }
 
-/** Prefills the editor with a copy of `host` (read-only hosts and Tailscale devices). */
+/** Prefills the editor with a copy of `host` (or saves a Tailscale device as a host). */
 export function duplicateHost(host: Host) {
   const base = host.source === "tailscale" ? host.name : `${host.name}-copy`;
   let name = base;
   for (let i = 2; hosts.findByName(name); i++) name = `${base}-${i}`;
+  // Copy what the block says, so options from shared blocks (Host *) stay shared.
+  const written = isEditable(host) ? host.config!.written : null;
   newHost({
     name,
-    hostname: host.hostname,
-    port: host.port === 22 ? null : host.port,
-    user: host.user,
+    hostname: written ? (written.hostname ?? host.name) : host.hostname,
+    port: written ? written.port : host.port === 22 ? null : host.port,
+    user: written ? written.user : host.user,
     // A device's keys and jump hosts come from ssh_config anyway.
-    identityFiles: host.source === "tailscale" ? [] : [...host.identityFiles],
-    proxyJump: host.source === "tailscale" ? null : host.proxyJump,
+    identityFiles: written ? [...written.identityFiles] : host.source === "tailscale" ? [] : [...host.identityFiles],
+    proxyJump: written ? written.proxyJump : host.source === "tailscale" ? null : host.proxyJump,
     group: host.group,
     tags: [...host.tags],
   });
@@ -87,7 +89,7 @@ export function duplicateHost(host: Host) {
 export async function deleteHost(host: Host) {
   const ok = await ui.confirm({
     title: `Delete ${host.name}?`,
-    message: "The host is removed from ~/.ssh/patchbay.conf. Keys, known_hosts entries and saved passwords are kept.",
+    message: `Its Host block is removed from ${tildify(host.config?.file ?? "~/.ssh/config")}. Keys, known_hosts entries and saved passwords are kept.`,
     confirmLabel: "Delete host",
     danger: true,
   });
@@ -100,26 +102,8 @@ export async function deleteHost(host: Host) {
   }
 }
 
-const SHARE_OFFERED_KEY = "patchbay.sshShareOffered";
-
-/**
- * Offers (once) to add `Include patchbay.conf` to ~/.ssh/config when there
- * are Patchbay hosts ssh can't see yet.
- */
-export function maybeOfferSshSharing() {
-  if (!hosts.sharing || hosts.sharing.shared) return;
-  if (!hosts.list.some((h) => h.source === "app")) return;
-  try {
-    if (localStorage.getItem(SHARE_OFFERED_KEY)) return;
-    localStorage.setItem(SHARE_OFFERED_KEY, "1");
-  } catch {
-    return;
-  }
-  ui.shareOffer = true;
-}
-
 export async function copySshCommand(host: Host) {
-  const command = sshCommand(host, hosts.sharing?.shared ?? false);
+  const command = sshCommand(host);
   try {
     await writeClipboard(command);
     toasts.success("Copied SSH command", command);
@@ -156,19 +140,13 @@ export function hostMenuItems(host: Host, { includeOpen = true } = {}): MenuItem
     }
     items.push({ label: "View details…", icon: FileText, onSelect: () => editHost(host) });
     items.push({ label: "Save as host…", icon: Save, onSelect: () => duplicateHost(host) });
-  } else if (host.source === "app") {
-    items.push({ label: "Edit…", icon: Pencil, onSelect: () => editHost(host) });
-    items.push({ label: "Duplicate…", icon: CopyPlus, onSelect: () => duplicateHost(host) });
   } else {
-    items.push({ label: "View details…", icon: FileText, onSelect: () => editHost(host) });
-    items.push({
-      label: "Duplicate as Patchbay host…",
-      icon: CopyPlus,
-      onSelect: () => duplicateHost(host),
-    });
+    if (isEditable(host)) items.push({ label: "Edit…", icon: Pencil, onSelect: () => editHost(host) });
+    else items.push({ label: "View details…", icon: FileText, onSelect: () => editHost(host) });
+    items.push({ label: "Duplicate…", icon: CopyPlus, onSelect: () => duplicateHost(host) });
   }
   items.push({ label: "Copy SSH command", icon: Copy, onSelect: () => void copySshCommand(host) });
-  if (host.source === "app") {
+  if (isEditable(host)) {
     items.push({ separator: true });
     items.push({ label: "Delete…", icon: Trash2, danger: true, onSelect: () => void deleteHost(host) });
   }

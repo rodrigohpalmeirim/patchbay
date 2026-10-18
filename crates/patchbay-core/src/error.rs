@@ -24,7 +24,7 @@ pub enum Error {
     #[error("unknown host: {0}")]
     UnknownHost(String),
 
-    #[error("host is read-only (not saved in Patchbay): {0}")]
+    #[error("Patchbay can't edit this host in your SSH config: {0}")]
     ReadOnlyHost(String),
 
     #[error("SSH error: {0}")]

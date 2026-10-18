@@ -16,7 +16,6 @@
   import HostEditor from "./lib/dialogs/HostEditor.svelte";
   import PromptDialog from "./lib/dialogs/PromptDialog.svelte";
   import SettingsDialog from "./lib/dialogs/SettingsDialog.svelte";
-  import ShareSshDialog from "./lib/dialogs/ShareSshDialog.svelte";
   import SnippetsDialog from "./lib/dialogs/SnippetsDialog.svelte";
   import WarningsDialog from "./lib/dialogs/WarningsDialog.svelte";
   import { startApp } from "./lib/stores/app";
@@ -179,9 +178,6 @@
   {#key ui.connectAs}
     <ConnectAsDialog request={ui.connectAs} />
   {/key}
-{/if}
-{#if ui.shareOffer && !prompts.current && !ui.editor}
-  <ShareSshDialog />
 {/if}
 {#if ui.menu}
   <ContextMenu menu={ui.menu} />

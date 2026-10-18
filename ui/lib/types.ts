@@ -1,9 +1,9 @@
 // Mirrors crates/patchbay-core/src/model.rs (serde camelCase). Keep in sync.
 
-/** `cfg:<alias>` for ssh_config hosts (including Patchbay's), `ts:<node id>` for Tailscale devices. */
+/** `cfg:<alias>` for ssh_config hosts, `ts:<node id>` for Tailscale devices. */
 export type HostId = string;
-/** sshConfig: written by the user (read-only); app: saved in Patchbay (~/.ssh/patchbay.conf). */
-export type HostSource = "sshConfig" | "app" | "tailscale";
+/** sshConfig: a `Host` in ~/.ssh/config or its includes (see `Host.config`). */
+export type HostSource = "sshConfig" | "tailscale";
 
 export interface Host {
   id: HostId;
@@ -16,8 +16,34 @@ export interface Host {
   proxyJump: string | null;
   group: string | null;
   tags: string[];
+  /** Set for ssh_config hosts. */
+  config?: ConfigInfo;
   /** Set for Tailscale devices. */
   tailscale?: TailscaleInfo;
+}
+
+/** Where an ssh_config host is defined and whether Patchbay can edit it. */
+export interface ConfigInfo {
+  /** The file with the host's `Host` line. */
+  file: string;
+  /** 1-based line of the `Host` line. */
+  line: number;
+  /** Why Patchbay can't edit the host; null if it can. */
+  readOnly: string | null;
+  /** The options written in the host's own block (what the editor edits). */
+  written: WrittenOptions;
+  /** Options in the block that ssh ignores because an earlier block sets them. */
+  overridden: string[];
+  /** `ssh <name>` works: the file is (included from) ~/.ssh/config. */
+  visibleToSsh: boolean;
+}
+
+export interface WrittenOptions {
+  hostname: string | null;
+  port: number | null;
+  user: string | null;
+  identityFiles: string[];
+  proxyJump: string | null;
 }
 
 export interface TailscaleInfo {
@@ -32,12 +58,6 @@ export interface TailscaleInfo {
   owner: string | null;
   /** Users to offer when asking whom to log in as, best guess first. */
   userSuggestions: string[];
-}
-
-/** Whether ~/.ssh/config includes the file Patchbay hosts are saved in. */
-export interface SshSharing {
-  shared: boolean;
-  path: string;
 }
 
 export interface HostDraft {

@@ -20,6 +20,7 @@
   import type { TermSession } from "../stores/terminals.svelte";
   import type { Host } from "../types";
   import { errorTitle, sentence } from "../util/errors";
+  import { isEditable } from "../util/format";
   import { isMac } from "../util/platform";
   import FindBar from "./FindBar.svelte";
   import { keyLabel } from "./keys";
@@ -194,7 +195,7 @@
           <div class="gate-title">{errorTitle(conn.error.kind)}</div>
           <p class="gate-text selectable">{sentence(conn.error.message)}</p>
           <div class="gate-actions">
-            <button class="btn btn-sm" onclick={() => editHost(host)}>{host.source === "app" ? "Edit host…" : "View settings…"}</button>
+            <button class="btn btn-sm" onclick={() => editHost(host)}>{isEditable(host) ? "Edit host…" : "View settings…"}</button>
             <button class="btn btn-sm btn-primary" onclick={connect}><RotateCw size={13} /> Try again</button>
           </div>
         {:else if host && phase === "idle"}
@@ -257,7 +258,7 @@
           <strong>{errorTitle(conn.error.kind)}</strong>
           <span class="exit-detail">{sentence(conn.error.message)}</span>
         </span>
-        <button class="btn btn-sm btn-ghost" onclick={() => editHost(host)}>{host.source === "app" ? "Edit host…" : "View settings…"}</button>
+        <button class="btn btn-sm btn-ghost" onclick={() => editHost(host)}>{isEditable(host) ? "Edit host…" : "View settings…"}</button>
         <button class="btn btn-sm btn-primary" onclick={connect}><RotateCw size={13} /> Try again</button>
       {:else if host && phase === "idle"}
         <span class="exit-icon"><Unplug size={14} /></span>

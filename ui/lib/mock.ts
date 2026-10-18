@@ -49,6 +49,7 @@ import { createTerminals } from "./mock/shell";
 import type {
   CommandError,
   ConnectionState,
+  ConfigInfo,
   CoreEvent,
   ErrorKind,
   Host,
@@ -64,7 +65,35 @@ import type {
 
 const HOME = "~";
 
-const INITIAL_HOSTS: Host[] = [
+const SSH_CONFIG = `${HOME}/.ssh/config`;
+
+/** Hosts Patchbay can't edit in the mock, and why. */
+const READ_ONLY: Record<string, [file: string, reason: string]> = {
+  "legacy-nas": [SSH_CONFIG, "It shares its Host line with other names (Host legacy-nas nas)."],
+  "build-mac": [`${HOME}/.ssh/config.d/work`, "~/.ssh/config.d/work can’t be changed: the file is read-only."],
+};
+
+function configInfo(h: Host, line: number): ConfigInfo {
+  const [file, readOnly] = READ_ONLY[h.name] ?? [SSH_CONFIG, null];
+  return {
+    file,
+    line,
+    readOnly,
+    written: readOnly
+      ? { hostname: null, port: null, user: null, identityFiles: [], proxyJump: null }
+      : {
+          hostname: h.hostname,
+          port: h.port === 22 ? null : h.port,
+          user: h.user,
+          identityFiles: [...h.identityFiles],
+          proxyJump: h.proxyJump,
+        },
+    overridden: [],
+    visibleToSsh: true,
+  };
+}
+
+const INITIAL_HOSTS: Host[] = ([
   {
     id: "cfg:bastion",
     name: "bastion",
@@ -116,7 +145,7 @@ const INITIAL_HOSTS: Host[] = [
   {
     id: "cfg:raspberrypi",
     name: "raspberrypi",
-    source: "app",
+    source: "sshConfig",
     hostname: "192.168.1.40",
     port: 22,
     user: "pi",
@@ -128,7 +157,7 @@ const INITIAL_HOSTS: Host[] = [
   {
     id: "cfg:media-share",
     name: "media-share",
-    source: "app",
+    source: "sshConfig",
     hostname: "media.home.arpa",
     port: 22,
     user: "media",
@@ -140,7 +169,7 @@ const INITIAL_HOSTS: Host[] = [
   {
     id: "cfg:prod-web-01",
     name: "prod-web-01",
-    source: "app",
+    source: "sshConfig",
     hostname: "web01.prod.example.com",
     port: 22,
     user: "deploy",
@@ -152,7 +181,7 @@ const INITIAL_HOSTS: Host[] = [
   {
     id: "cfg:staging-api",
     name: "staging-api",
-    source: "app",
+    source: "sshConfig",
     hostname: "api.staging.example.com",
     port: 2200,
     user: "deploy",
@@ -164,7 +193,7 @@ const INITIAL_HOSTS: Host[] = [
   {
     id: "cfg:win-buildbox",
     name: "win-buildbox",
-    source: "app",
+    source: "sshConfig",
     hostname: "10.20.0.15",
     port: 22,
     user: "rodrigo",
@@ -173,7 +202,7 @@ const INITIAL_HOSTS: Host[] = [
     group: null,
     tags: ["windows"],
   },
-];
+] satisfies Host[]).map((h, i) => ({ ...h, config: configInfo(h, 1 + i * 6) }));
 
 const TS_SUFFIX = "tail1234.ts.net";
 
@@ -313,7 +342,6 @@ export function createMockBackend(): Backend {
     hosts = [...configHosts, ...(tailscaleOn ? tailnet : [])];
   };
   const renamed: Record<HostId, HostId> = {};
-  let sharing = { shared: false, path: `${HOME}/.ssh/patchbay.conf` };
   let snippets: Snippet[] = structuredClone(INITIAL_SNIPPETS);
   const eventHandlers = new Set<(e: CoreEvent) => void>();
   const promptHandlers = new Set<(p: PromptPayload) => void>();
@@ -359,25 +387,36 @@ export function createMockBackend(): Backend {
 
   const validate = (draft: HostDraft, selfId: HostId | null) => {
     if (!draft.name.trim()) throw err("other", "name must not be empty");
-    if (!draft.hostname.trim()) throw err("other", "hostname must not be empty");
+    if (!selfId && !draft.hostname.trim()) throw err("other", "hostname must not be empty");
     const clash = hosts.find(
       (h) => h.id !== selfId && h.name.toLowerCase() === draft.name.trim().toLowerCase(),
     );
     if (clash) throw err("other", `a host named "${draft.name}" already exists`);
   };
 
-  const fromDraft = (id: HostId, d: HostDraft): Host => ({
-    id,
-    name: d.name.trim(),
-    source: "app",
-    hostname: d.hostname.trim(),
-    port: d.port ?? 22,
-    user: d.user,
-    identityFiles: [...d.identityFiles],
-    proxyJump: d.proxyJump,
-    group: d.group,
-    tags: [...d.tags],
-  });
+  const fromDraft = (id: HostId, d: HostDraft, line: number): Host => {
+    const host: Host = {
+      id,
+      name: d.name.trim(),
+      source: "sshConfig",
+      hostname: d.hostname.trim() || d.name.trim(),
+      port: d.port ?? 22,
+      user: d.user,
+      identityFiles: [...d.identityFiles],
+      proxyJump: d.proxyJump,
+      group: d.group,
+      tags: [...d.tags],
+    };
+    host.config = configInfo(host, line);
+    host.config.written.hostname = d.hostname.trim() || null;
+    return host;
+  };
+  const editable = (id: HostId): Host => {
+    const host = find(id);
+    if (!host.config || host.config.readOnly)
+      throw err("readOnlyHost", `${host.name} can't be edited in Patchbay`);
+    return host;
+  };
 
   /** Walks the ProxyJump chain (by host name), first hop first. */
   const jumpChain = (host: Host, seen = new Set<string>()): string[] => {
@@ -671,7 +710,8 @@ export function createMockBackend(): Backend {
     },
     async createHost(draft) {
       validate(draft, null);
-      const host = fromDraft(`cfg:${draft.name.trim()}`, draft);
+      const last = Math.max(0, ...configHosts.map((h) => h.config?.line ?? 0));
+      const host = fromDraft(`cfg:${draft.name.trim()}`, draft, last + 6);
       delete renamed[host.id];
       configHosts = [...configHosts, host];
       relist();
@@ -679,11 +719,9 @@ export function createMockBackend(): Backend {
       return structuredClone(host);
     },
     async updateHost(id, draft) {
-      const existing = find(id);
-      if (existing.source !== "app")
-        throw err("readOnlyHost", `${existing.name} is defined in ~/.ssh/config and is read-only`);
+      const existing = editable(id);
       validate(draft, id);
-      const host = fromDraft(`cfg:${draft.name.trim()}`, draft);
+      const host = fromDraft(`cfg:${draft.name.trim()}`, draft, existing.config!.line);
       if (host.id !== id) {
         if (sessions.has(id)) throw err("other", "Disconnect from this host before renaming it");
         for (const [from, to] of Object.entries(renamed)) if (to === id) renamed[from] = host.id;
@@ -698,17 +736,23 @@ export function createMockBackend(): Backend {
     async hostRenames() {
       return { ...renamed };
     },
-    async sshSharing() {
-      return { ...sharing };
+    async newHostFile() {
+      return SSH_CONFIG;
     },
-    async setSshSharing(shared) {
-      sharing = { ...sharing, shared };
-      return { ...sharing };
+    async organizeHost(id, group, tags) {
+      const host = find(id);
+      if (!host.config) throw err("unknownHost", `unknown host: ${id}`);
+      const updated = { ...host, group: group?.trim() || null, tags: [...new Set(tags.map((t) => t.trim()).filter(Boolean))] };
+      configHosts = configHosts.map((h) => (h.id === id ? updated : h));
+      relist();
+      emit({ type: "hostsChanged" });
+      return structuredClone(updated);
+    },
+    async openHostFile(id) {
+      find(id);
     },
     async deleteHost(id) {
-      const existing = find(id);
-      if (existing.source !== "app")
-        throw err("readOnlyHost", `${existing.name} is defined in ~/.ssh/config and is read-only`);
+      editable(id);
       sessions.get(id)?.abort.abort();
       sessions.delete(id);
       files.hostDisconnected(id);

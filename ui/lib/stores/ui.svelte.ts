@@ -78,8 +78,6 @@ class Ui {
   snippets = $state<SnippetsDialogState | null>(null);
   forwardEditor = $state<ForwardEditorState | null>(null);
   connectAs = $state<ConnectAsState | null>(null);
-  /** Offer to add `Include patchbay.conf` to ~/.ssh/config. */
-  shareOffer = $state(false);
   /** Registered by the sidebar so global shortcuts can focus the search box. */
   focusSearch: () => void = () => {};
 

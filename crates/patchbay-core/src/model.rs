@@ -8,22 +8,21 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Stable host identifier. `cfg:<alias>` for ssh_config hosts (including
-/// the ones saved in Patchbay), `ts:<stable node id>` for Tailscale devices.
+/// the ones added in Patchbay), `ts:<stable node id>` for Tailscale devices.
 pub type HostId = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HostSource {
-    /// Written by the user in `~/.ssh/config` (or its includes): read-only.
+    /// A `Host` in `~/.ssh/config` (or its includes); see [`Host::config`].
     SshConfig,
-    /// Saved in Patchbay (`~/.ssh/patchbay.conf`): editable.
-    App,
     /// A device on the user's tailnet.
     Tailscale,
 }
 
-/// A host as shown in the sidebar. For `SshConfig` hosts the fields are the
-/// *effective* values after applying all matching `Host` blocks.
+/// A host as shown in the sidebar. The connection fields are the
+/// *effective* values after applying all matching `Host` blocks (what
+/// `ssh <name>` would use).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Host {
@@ -41,9 +40,43 @@ pub struct Host {
     pub group: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Set for ssh_config hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ConfigInfo>,
     /// Set for Tailscale devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tailscale: Option<TailscaleInfo>,
+}
+
+/// Where an ssh_config host is defined and whether Patchbay can edit it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigInfo {
+    /// The file with the host's `Host` line.
+    pub file: PathBuf,
+    /// 1-based line of the `Host` line.
+    pub line: usize,
+    /// Why Patchbay can't edit the host; `None` if it can.
+    pub read_only: Option<String>,
+    /// The options written in the host's own block (what the editor
+    /// edits); empty for read-only hosts.
+    pub written: WrittenOptions,
+    /// Options written in the host's block that ssh ignores because an
+    /// earlier block sets them, as sentences for the editor.
+    pub overridden: Vec<String>,
+    /// `ssh <name>` works: the file is (included from) `~/.ssh/config`.
+    pub visible_to_ssh: bool,
+}
+
+/// The options Patchbay edits, as written in a host's block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WrittenOptions {
+    pub hostname: Option<String>,
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub identity_files: Vec<String>,
+    pub proxy_jump: Option<String>,
 }
 
 /// What Tailscale knows about a device.
@@ -63,7 +96,8 @@ pub struct TailscaleInfo {
     pub user_suggestions: Vec<String>,
 }
 
-/// Fields the user may set when creating or editing a Patchbay host.
+/// Fields the user may set when creating or editing a host. An empty
+/// `hostname` means the name itself.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostDraft {

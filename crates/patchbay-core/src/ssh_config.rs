@@ -376,6 +376,19 @@ enum Item {
     Directive(Directive),
 }
 
+/// The `Host` line a host alias first appears on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasOrigin {
+    pub file: PathBuf,
+    /// 1-based.
+    pub line: usize,
+    /// All patterns on the line (the alias among them).
+    pub patterns: Vec<String>,
+    /// The file was included from inside a `Host` / `Match` block, so the
+    /// block only applies when that one matches too.
+    pub nested: bool,
+}
+
 /// A parsed OpenSSH client config, ready to resolve hosts against.
 #[derive(Debug, Clone)]
 pub struct SshConfig {
@@ -383,8 +396,8 @@ pub struct SshConfig {
     items: Vec<Item>,
     conditions: Vec<Condition>,
     host_aliases: Vec<String>,
-    /// File each of `host_aliases` was first seen in.
-    alias_files: Vec<PathBuf>,
+    /// Where each of `host_aliases` was first seen.
+    alias_origins: Vec<AliasOrigin>,
     /// Every file read (the main file and all includes), in reading order.
     files: Vec<PathBuf>,
     warnings: Vec<String>,
@@ -398,7 +411,7 @@ impl SshConfig {
             items: Vec::new(),
             conditions: Vec::new(),
             host_aliases: Vec::new(),
-            alias_files: Vec::new(),
+            alias_origins: Vec::new(),
             files: Vec::new(),
             warnings: Vec::new(),
         }
@@ -458,7 +471,7 @@ impl SshConfig {
             items: Vec::new(),
             conditions: Vec::new(),
             host_aliases: Vec::new(),
-            alias_files: Vec::new(),
+            alias_origins: Vec::new(),
             seen_aliases: HashSet::new(),
             files: vec![path.to_owned()],
             warnings: Vec::new(),
@@ -472,7 +485,7 @@ impl SshConfig {
             items,
             conditions,
             host_aliases,
-            alias_files,
+            alias_origins,
             files,
             warnings,
             ..
@@ -482,7 +495,7 @@ impl SshConfig {
             items,
             conditions,
             host_aliases,
-            alias_files,
+            alias_origins,
             files,
             warnings,
         }
@@ -496,12 +509,18 @@ impl SshConfig {
             .any(|f| f == file || (canonical.is_some() && fs::canonicalize(f).ok() == canonical))
     }
 
-    /// The file the `Host` line that introduced `alias` is in.
-    pub fn alias_file(&self, alias: &str) -> Option<&Path> {
+    /// The `Host` line that introduced `alias`.
+    pub fn alias_origin(&self, alias: &str) -> Option<&AliasOrigin> {
         self.host_aliases
             .iter()
             .position(|a| a.eq_ignore_ascii_case(alias))
-            .map(|i| self.alias_files[i].as_path())
+            .map(|i| &self.alias_origins[i])
+    }
+
+    /// Every file read (the main file first, then includes in reading
+    /// order).
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
     }
 
     pub fn env(&self) -> &LocalEnv {
@@ -604,7 +623,7 @@ struct Parser<'e> {
     items: Vec<Item>,
     conditions: Vec<Condition>,
     host_aliases: Vec<String>,
-    alias_files: Vec<PathBuf>,
+    alias_origins: Vec<AliasOrigin>,
     seen_aliases: HashSet<String>,
     files: Vec<PathBuf>,
     warnings: Vec<String>,
@@ -653,7 +672,12 @@ impl Parser<'_> {
                             && self.seen_aliases.insert(a.to_lowercase())
                         {
                             self.host_aliases.push(a.clone());
-                            self.alias_files.push(file.to_owned());
+                            self.alias_origins.push(AliasOrigin {
+                                file: file.to_owned(),
+                                line: line_no,
+                                patterns: args.clone(),
+                                nested: !outer.is_empty(),
+                            });
                         }
                     }
                     let patterns = args.iter().map(|a| Pattern::parse(a)).collect();

@@ -5,10 +5,10 @@
   import Copy from "@lucide/svelte/icons/copy";
   import Ellipsis from "@lucide/svelte/icons/ellipsis";
   import ExternalLink from "@lucide/svelte/icons/external-link";
-  import FileText from "@lucide/svelte/icons/file-text";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import House from "@lucide/svelte/icons/house";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Lock from "@lucide/svelte/icons/lock";
   import MessageSquare from "@lucide/svelte/icons/message-square";
   import Network from "@lucide/svelte/icons/network";
   import Pencil from "@lucide/svelte/icons/pencil";
@@ -48,7 +48,7 @@
   import { ui } from "../stores/ui.svelte";
   import type { Host } from "../types";
   import { errorTitle, sentence } from "../util/errors";
-  import { address, firstUrl, hopLabel, jumpHops, osLabel, tailscaleOs } from "../util/format";
+  import { address, firstUrl, hopLabel, isEditable, jumpHops, osLabel, tailscaleOs } from "../util/format";
   import { openInBrowser } from "../util/links";
 
   let { host }: { tab: HostTab; host: Host; active: boolean } = $props();
@@ -128,14 +128,12 @@
           <h1 class="selectable" title={host.name}>{host.name}</h1>
         </div>
         <div class="address">
-          {#if host.source === "sshConfig"}
-            <span class="badge" title="Defined in ~/.ssh/config (read-only)"><FileText size={11} /> SSH config</span>
-          {:else if host.tailscale}
+          {#if host.tailscale}
             <span class="badge" class:success={host.tailscale.online} title="On your tailnet">
               <Network size={11} /> Tailscale · {host.tailscale.online ? "online" : "offline"}
             </span>
-          {:else}
-            <span class="badge accent" title="Saved in ~/.ssh/patchbay.conf">Patchbay</span>
+          {:else if host.config?.readOnly}
+            <span class="badge" title="Patchbay can’t edit this host. {host.config.readOnly}"><Lock size={11} /> Read-only</span>
           {/if}
           <span class="mono selectable">{address(host)}</span>
           <button class="icon-btn sm" title="Copy SSH command" aria-label="Copy SSH command" onclick={() => copySshCommand(host)}>
@@ -255,7 +253,7 @@
                   <button class="btn btn-sm" onclick={() => connectHostAs(host)}>Connect as…</button>
                 {/if}
                 <button class="btn btn-sm" onclick={() => editHost(host)}>
-                  {host.source === "app" ? "Edit host…" : "View settings…"}
+                  {isEditable(host) ? "Edit host…" : "View settings…"}
                 </button>
                 <span class="spacer"></span>
                 <button class="icon-btn sm" aria-label="Dismiss error" title="Dismiss" onclick={() => connections.dismiss(host.id)}>
@@ -370,12 +368,14 @@
     <section class="block" aria-labelledby="details-{host.id}">
       <div class="block-head">
         <h2 id="details-{host.id}" class="block-title">Details</h2>
-        {#if host.source === "app"}
+        {#if isEditable(host)}
           <button class="btn btn-ghost btn-sm" onclick={() => editHost(host)}><Pencil size={13} /> Edit</button>
         {:else if host.source === "tailscale"}
           <button class="btn btn-ghost btn-sm" onclick={() => duplicateHost(host)}><Save size={13} /> Save as host</button>
         {:else}
-          <span class="muted small">From <code>~/.ssh/config</code> · read-only</span>
+          <button class="btn btn-ghost btn-sm" onclick={() => editHost(host)} title={host.config?.readOnly ?? undefined}>
+            <Lock size={13} /> Read-only…
+          </button>
         {/if}
       </div>
       <HostDetails {host} />

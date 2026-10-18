@@ -6,7 +6,11 @@
   import type { Host } from "../types";
   import { jumpHops, tildify } from "../util/format";
 
-  let { host, linkHops = true }: { host: Host; linkHops?: boolean } = $props();
+  let {
+    host,
+    linkHops = true,
+    organization = true,
+  }: { host: Host; linkHops?: boolean; organization?: boolean } = $props();
 
   const hops = $derived(jumpHops(host.proxyJump));
 </script>
@@ -81,7 +85,13 @@
       <dd class:none={!ts.ssh}>{ts.ssh ? "On — host keys come from Tailscale" : "Off"}</dd>
     </div>
   {/if}
-  {#if host.source === "app"}
+  {#if host.config}
+    <div class="item">
+      <dt>Defined in</dt>
+      <dd class="mono selectable" title={host.config.file}>{tildify(host.config.file)}:{host.config.line}</dd>
+    </div>
+  {/if}
+  {#if host.config && organization}
     <div class="item">
       <dt>Group</dt>
       <dd class:none={!host.group}>{host.group ?? "None"}</dd>

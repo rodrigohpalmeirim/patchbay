@@ -1,6 +1,5 @@
 // Wires backend events into the stores. Called once from App.svelte.
 
-import { maybeOfferSshSharing } from "../actions";
 import { getBackend, isTauri } from "../api";
 import { setHomeDir } from "../util/format";
 import { appSettings } from "./appSettings.svelte";
@@ -97,7 +96,6 @@ async function start(): Promise<() => void> {
   for (const [id, state] of Object.entries(current)) connections.handle(id, state);
   session.restore();
   const stopSession = session.start();
-  maybeOfferSshSharing();
   return () => {
     stopSession();
     unlisten.forEach((u) => u());

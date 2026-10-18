@@ -20,7 +20,7 @@
   import type { FilesTab } from "../stores/tabs.svelte";
   import type { Host } from "../types";
   import { errorTitle, sentence } from "../util/errors";
-  import { address } from "../util/format";
+  import { address, isEditable } from "../util/format";
 
   let { tab, host, active }: { tab: FilesTab; host: Host | null; active: boolean } = $props();
 
@@ -89,7 +89,7 @@
             </div>
           </div>
           <div class="gate-actions">
-            <button class="btn" onclick={() => editHost(host)}>{host.source === "app" ? "Edit host…" : "View settings…"}</button>
+            <button class="btn" onclick={() => editHost(host)}>{isEditable(host) ? "Edit host…" : "View settings…"}</button>
             <button class="btn btn-primary" onclick={connect}><RotateCw size={14} /> Try again</button>
           </div>
         {:else if stageLabel}

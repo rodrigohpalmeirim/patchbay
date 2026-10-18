@@ -15,9 +15,10 @@ things may still change. See [DESIGN.md](DESIGN.md) for the design decisions and
 
 ## Features
 
-- **Hosts**: reads `~/.ssh/config` (patterns, `Include`, `ProxyJump`, forwards, ...). Hosts
-  you add in Patchbay are saved in `~/.ssh/patchbay.conf`, a plain ssh_config file that
-  `ssh` can use too (one `Include` line, added with your consent), with groups and tags.
+- **Hosts**: your `~/.ssh/config` is the host list (patterns, `Include`, `ProxyJump`,
+  forwards, ...), so `ssh` and Patchbay always agree. Adding, editing and deleting hosts
+  changes just that host's lines and keeps your comments and formatting; hosts Patchbay
+  can't safely edit (`Host a b`, read-only files) say why. Groups and tags for every host.
   One shared connection per host with keepalive and auto-reconnect.
 - **Tailscale**: devices on your tailnet are listed automatically (when Tailscale is
   installed), with online state; Patchbay asks once which user to log in as and remembers

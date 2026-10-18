@@ -71,7 +71,7 @@ impl AppState {
         let fs = FileSystem::new(sessions.clone());
         let hosts = HostStore::load_default()?;
         // References to hosts renamed while they couldn't follow (e.g. hosts
-        // moved to patchbay.conf on first launch).
+        // moved into ~/.ssh/config on first launch).
         let mut forward_store = ForwardStore::load_default()?;
         let mut snippet_store = SnippetStore::load_default()?;
         if let Err(e) = forward_store.rename_hosts(hosts.renamed()) {

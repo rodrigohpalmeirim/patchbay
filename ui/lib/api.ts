@@ -15,7 +15,6 @@ import type {
   HostDraft,
   HostId,
   PromptPayload,
-  SshSharing,
   PortForward,
   PortForwardDraft,
   PortForwardStatus,
@@ -41,9 +40,12 @@ export interface Backend {
   deleteHost(id: HostId): Promise<void>;
   /** Old id -> current id of renamed hosts. */
   hostRenames(): Promise<Record<HostId, HostId>>;
-  sshSharing(): Promise<SshSharing>;
-  /** Adds or removes `Include patchbay.conf` in ~/.ssh/config. */
-  setSshSharing(shared: boolean): Promise<SshSharing>;
+  /** The file new hosts are added to (~/.ssh/config unless it can't be written). */
+  newHostFile(): Promise<string>;
+  /** Sets the group and tags of a config host (read-only ones too). */
+  organizeHost(id: HostId, group: string | null, tags: string[]): Promise<Host>;
+  /** Opens the config file a host is defined in with the default app. */
+  openHostFile(id: HostId): Promise<void>;
   /** Current state of every known connection, e.g. after a webview reload. */
   listConnections(): Promise<Record<HostId, ConnectionState>>;
   /**
@@ -182,8 +184,9 @@ async function tauriBackend(): Promise<Backend> {
     updateHost: (id, draft) => invoke("update_host", { id, draft }),
     deleteHost: (id) => invoke("delete_host", { id }),
     hostRenames: () => invoke("host_renames"),
-    sshSharing: () => invoke("ssh_sharing"),
-    setSshSharing: (shared) => invoke("set_ssh_sharing", { shared }),
+    newHostFile: () => invoke("new_host_file"),
+    organizeHost: (id, group, tags) => invoke("organize_host", { id, group, tags }),
+    openHostFile: (id) => invoke("open_host_file", { id }),
     listConnections: () => invoke("list_connections"),
     connect: (id, user) => invoke("connect", { id, user: user ?? null }),
     disconnect: (id) => invoke("disconnect", { id }),
