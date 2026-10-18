@@ -1,0 +1,43 @@
+# Throwaway OpenSSH servers for Patchbay integration tests. TEST ONLY.
+#   docker compose -f docker/test/compose.yml up -d --build --wait
+# Contract: see docker/test/README.md
+name: patchbay-test
+
+x-sshd: &sshd
+  build: &build
+    context: .
+    dockerfile: Dockerfile
+  restart: "no"
+  networks: [sshnet]
+
+services:
+  target:
+    <<: *sshd
+    build:
+      <<: *build
+      args: { ROLE: target }
+    image: patchbay-test-sshd:target
+    hostname: target
+    ports: ["127.0.0.1:2201:22"]
+
+  bastion:
+    <<: *sshd
+    build:
+      <<: *build
+      args: { ROLE: bastion }
+    image: patchbay-test-sshd:bastion
+    hostname: bastion
+    ports: ["127.0.0.1:2202:22"]
+    depends_on: [target]
+
+  sftponly:
+    <<: *sshd
+    build:
+      <<: *build
+      args: { ROLE: sftponly }
+    image: patchbay-test-sshd:sftponly
+    hostname: sftponly
+    ports: ["127.0.0.1:2203:22"]
+
+networks:
+  sshnet: {}

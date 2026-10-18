@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Patchbay",
+  "mainBinaryName": "patchbay",
+  "identifier": "io.github.rodrigohpalmeirim.patchbay",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Patchbay",
+        "width": 1200,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 480,
+        "center": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "A friendly GUI for SSH",
+    "longDescription": "Browse and transfer files, forward ports and open terminals on your machines over SSH.",
+    "license": "GPL-3.0-or-later",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwNzNBRDk5RDcwQUVBQTMKUldTajZnclhtYTF6TUFuMjY0U1ZISUNGVERFN1ZucnFSeFh5QS90M3h4VWQ4NGpmSFU1UVdMM3oK",
+      "endpoints": [
+        "https://github.com/rodrigohpalmeirim/patchbay/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

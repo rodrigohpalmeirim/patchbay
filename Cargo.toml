@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/patchbay-core", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/rodrigohpalmeirim/patchbay"
+rust-version = "1.90"
+
+[workspace.dependencies]
+patchbay-core = { path = "crates/patchbay-core" }
+russh = { version = "0.64", default-features = false, features = ["flate2", "ring", "rsa"] }
+russh-sftp = "3"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "6"
+keyring = "4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

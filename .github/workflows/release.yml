@@ -1,0 +1,222 @@
+name: Release
+
+# Builds installers for all platforms with tauri-action and attaches them, plus the
+# updater manifest (latest.json) and .sig files, to a DRAFT GitHub release.
+#
+#   * push a tag `v*`             -> draft release for that tag
+#   * workflow_dispatch + tag     -> draft release for that tag (created at the current commit if missing)
+#   * workflow_dispatch, no tag   -> build only; bundles are uploaded as workflow artifacts
+#
+# Signing is opt-in via secrets (see docs/releasing.md). Without them the builds are
+# unsigned (macOS: ad-hoc signed) and updater artifacts are skipped.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0). Leave empty for a build-only dry run."
+        required: false
+        default: ""
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  create-release:
+    name: create draft release
+    runs-on: ubuntu-24.04
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - name: Create (or reuse) draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            echo "No tag given: build-only run, no release."
+            echo "id=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # One release created up front avoids duplicate drafts from parallel matrix jobs.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+                 --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n1)
+          if [ -z "$id" ]; then
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+                   -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+                   -f name="Patchbay $TAG" \
+                   -f body="See the assets below to download and install this version." \
+                   -F draft=true -F prerelease=false --jq .id)
+            echo "Created draft release $id for $TAG"
+          else
+            echo "Reusing release $id for $TAG"
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS: one build per architecture instead of universal-apple-darwin:
+          # half-size downloads, the two builds run in parallel, and latest.json gets a
+          # native entry for each arch (darwin-aarch64 / darwin-x86_64).
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          # Oldest supported Ubuntu runner => oldest glibc => widest Linux compatibility.
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
+            libssl-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf pkg-config
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: npm ci
+        run: npm ci
+
+      # Exports signing variables ONLY when the corresponding secrets are non-empty
+      # (an empty APPLE_CERTIFICATE etc. would make the Tauri bundler fail), and writes
+      # tauri.conf.json overrides for the unsigned / optional-signing cases.
+      - name: Configure signing
+        id: signing
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows hook: Azure Trusted Signing (see docs/releasing.md).
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          TRUSTED_SIGNING_PROFILE: ${{ vars.TRUSTED_SIGNING_PROFILE }}
+        run: |
+          set -euo pipefail
+          export_env() { # export_env NAME  (multi-line safe)
+            local delim="EOF_$RANDOM$RANDOM"
+            { echo "$1<<$delim"; printf '%s\n' "${!1}"; echo "$delim"; } >> "$GITHUB_ENV"
+          }
+          overrides='{}'
+
+          # --- Updater signing (all platforms) ---
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            export_env TAURI_SIGNING_PRIVATE_KEY
+            export_env TAURI_SIGNING_PRIVATE_KEY_PASSWORD   # may be empty for keys without password
+            echo "Updater signing: enabled"
+          else
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY not set - building without updater artifacts (no latest.json / .sig)."
+            overrides=$(jq -c '.bundle.createUpdaterArtifacts = false' <<<"$overrides")
+          fi
+
+          # --- macOS code signing + notarization ---
+          if [ "$RUNNER_OS" = macOS ]; then
+            if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then
+              export_env APPLE_CERTIFICATE
+              export_env APPLE_CERTIFICATE_PASSWORD
+              [ -n "$APPLE_SIGNING_IDENTITY" ] && export_env APPLE_SIGNING_IDENTITY
+              echo "macOS signing: Developer ID certificate"
+              if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+                export_env APPLE_ID; export_env APPLE_PASSWORD; export_env APPLE_TEAM_ID
+                echo "macOS notarization: enabled"
+              else
+                echo "::warning::APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID incomplete - not notarizing."
+              fi
+            else
+              # Ad-hoc signature: unsigned, but runs on Apple Silicon after the usual Gatekeeper override.
+              echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+              echo "::warning::No Apple certificate - macOS build is ad-hoc signed only."
+            fi
+          fi
+
+          # --- Windows code signing hook (Azure Trusted Signing) ---
+          if [ "$RUNNER_OS" = Windows ]; then
+            if [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ] && [ -n "$AZURE_TENANT_ID" ] \
+               && [ -n "$TRUSTED_SIGNING_ENDPOINT" ] && [ -n "$TRUSTED_SIGNING_ACCOUNT" ] && [ -n "$TRUSTED_SIGNING_PROFILE" ]; then
+              export_env AZURE_CLIENT_ID; export_env AZURE_CLIENT_SECRET; export_env AZURE_TENANT_ID
+              overrides=$(jq -c \
+                --arg e "$TRUSTED_SIGNING_ENDPOINT" --arg a "$TRUSTED_SIGNING_ACCOUNT" --arg c "$TRUSTED_SIGNING_PROFILE" \
+                '.bundle.windows.signCommand = {cmd: "trusted-signing-cli", args: ["-e",$e,"-a",$a,"-c",$c,"-d","Patchbay","%1"]}' \
+                <<<"$overrides")
+              echo "windows_signing=true" >> "$GITHUB_OUTPUT"
+              echo "Windows signing: Azure Trusted Signing"
+            else
+              echo "::warning::Azure Trusted Signing not configured - Windows build is unsigned."
+            fi
+          fi
+
+          # tauri.conf.json overrides go through a file (absolute, forward-slash path) to
+          # avoid quoting issues in tauri-action's argument parsing.
+          config_args=""
+          if [ "$overrides" != '{}' ]; then
+            file="$RUNNER_TEMP/tauri.release-overrides.json"
+            printf '%s\n' "$overrides" > "$file"
+            if [ "$RUNNER_OS" = Windows ]; then file=$(cygpath -m "$file"); fi
+            config_args="--config $file"
+            echo "tauri.conf.json overrides: $overrides"
+          fi
+          echo "config_args=$config_args" >> "$GITHUB_OUTPUT"
+
+      - name: Install trusted-signing-cli
+        if: steps.signing.outputs.windows_signing == 'true'
+        run: cargo install trusted-signing-cli --locked
+
+      - name: Build and upload
+        uses: tauri-apps/tauri-action@v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} ${{ steps.signing.outputs.config_args }}
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          # Always keep the bundles as workflow artifacts too (the only output of dry runs).
+          uploadWorkflowArtifacts: true
+          retryAttempts: 1

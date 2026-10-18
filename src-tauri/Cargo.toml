@@ -1,0 +1,41 @@
+[package]
+name = "patchbay"
+description = "A friendly GUI for SSH: files, port forwards and terminals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "patchbay_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+patchbay-core.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-drag = "2.1"
+futures-util = "0.3"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Already used by tauri-plugin-autostart; used directly for a per-user login item.
+auto-launch = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"

@@ -1,0 +1,29 @@
+# TEST ONLY - deliberately permissive OpenSSH config for Patchbay integration tests.
+Port 22
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_rsa_key
+LogLevel VERBOSE
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM yes
+MaxAuthTries 10
+MaxSessions 50
+MaxStartups 100:30:200
+PrintMotd no
+UseDNS no
+AcceptEnv LANG LC_*
+Subsystem sftp internal-sftp
+
+# --- target ---
+AllowTcpForwarding yes
+AllowStreamLocalForwarding yes
+GatewayPorts clientspecified
+PermitTunnel no
+X11Forwarding no
+AllowAgentForwarding yes
+PermitTTY yes
