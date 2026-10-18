@@ -1602,12 +1602,15 @@ mod tests {
         assert_eq!(unique_alias("A", &taken), "A-3");
         assert_eq!(rename_hop("a,u@A:1", "a", "b").as_deref(), Some("b,u@b:1"));
         assert_eq!(rename_hop("x,y", "a", "b"), None);
-        let home = Path::new("/home/me");
+        // Absolute on every platform (Windows needs a drive).
+        let home = std::env::temp_dir().join("me");
+        let home = home.as_path();
         assert_eq!(
-            portable_path(Path::new("/home/me/.ssh/k"), home),
+            portable_path(&home.join(".ssh").join("k"), home),
             "~/.ssh/k"
         );
-        assert_eq!(portable_path(Path::new("/etc/k"), home), "/etc/k");
+        let elsewhere = std::env::temp_dir().join("k");
+        assert_eq!(portable_path(&elsewhere, home), elsewhere.to_string_lossy());
         assert_eq!(portable_path(Path::new("~/k"), home), "~/k");
     }
 
