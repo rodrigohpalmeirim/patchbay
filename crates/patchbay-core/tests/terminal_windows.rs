@@ -55,7 +55,11 @@ async fn local_conpty() {
     write("echo \"hi-$(1+2) $env:TERM_PROGRAM\"\r");
     expect(&mut out, &mut seen, "hi-3 Patchbay").await;
     write("echo \"cwd=$((Get-Location).Path)=\"\r");
-    expect(&mut out, &mut seen, &format!("cwd={}=", cwd.display())).await;
+    // PowerShell prints long names; %TEMP% may be an 8.3 path (RUNNER~1).
+    let long = std::fs::canonicalize(&cwd).unwrap();
+    let long = long.to_string_lossy();
+    let long = long.strip_prefix(r"\\?\").unwrap_or(&long);
+    expect(&mut out, &mut seen, &format!("cwd={long}=")).await;
     terminals.resize(info.id, 132, 43).unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     write("echo \"size-$($Host.UI.RawUI.WindowSize.Width)x$($Host.UI.RawUI.WindowSize.Height)\"\r");

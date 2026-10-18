@@ -290,11 +290,16 @@ mod tests {
         let first = raw(timed(rx.recv()).await.unwrap()).len() as u64;
         fx.streams.ack(id, first);
 
-        // Without further acks forwarding stops at the high-water mark.
+        // Without further acks forwarding stops at the high-water mark. The
+        // first chunk may be just the prompt, so wait longer for the data to
+        // start (slow shell startup on CI runners).
         let mut received = first;
-        while let Ok(Some(body)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await
-        {
-            received += raw(body).len() as u64;
+        loop {
+            let wait = if received > HIGH_WATER { 500 } else { 10_000 };
+            match tokio::time::timeout(Duration::from_millis(wait), rx.recv()).await {
+                Ok(Some(body)) => received += raw(body).len() as u64,
+                _ => break,
+            }
         }
         let max_chunk = 2 * patchbay_core::terminal::MAX_CHUNK as u64;
         assert!(received > HIGH_WATER, "{received}");

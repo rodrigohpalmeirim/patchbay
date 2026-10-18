@@ -438,9 +438,8 @@ async fn heavy_output(h: &mut Harness, t: &mut Term, bytes: u64) -> (u64, Durati
     .await;
     let elapsed = started.elapsed();
     drop(out);
-    // base64: 4 chars per 3 bytes plus a CR LF per 76 chars.
+    // base64: 4 chars per 3 bytes (GNU base64 also wraps lines, BSD's doesn't).
     let expected = bytes.div_ceil(3) * 4;
-    let expected = expected + expected.div_ceil(76) * 2;
     assert!(
         total >= expected,
         "got {total} bytes, expected at least {expected}"
