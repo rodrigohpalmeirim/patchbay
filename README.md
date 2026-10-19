@@ -49,6 +49,10 @@ servers. It runs on Windows, macOS and Linux, and it's free and open source.
 - **It picks up where you left off.** Your tabs come back when you restart, and the app
   updates itself.
 
+<p align="center">
+  <img src="assets/screenshot-forward.png" width="900" alt="The port forward dialog: a route from this computer over SSH to a server, with one-click presets for common services">
+</p>
+
 ## Install
 
 Download the latest version from the
