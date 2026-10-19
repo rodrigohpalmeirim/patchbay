@@ -1,127 +1,84 @@
-<p align="center"><img src="assets/logo.svg" width="128" alt="Patchbay logo"></p>
+<p align="center"><img src="assets/logo.svg" width="112" alt="Patchbay logo"></p>
 
 <h1 align="center">Patchbay</h1>
 
-<p align="center">A friendly, cross-platform GUI for working with machines over SSH.</p>
+<p align="center">
+  A friendly desktop app for working with your machines over SSH.<br>
+  Browse and transfer files, forward ports and open terminals, all in one window.
+</p>
 
-Patchbay is an open-source desktop app (Windows, macOS, Linux) for browsing and transferring
-files, forwarding ports and opening terminals on your machines over SSH. It is built with
-[Tauri 2](https://tauri.app), Rust ([`russh`](https://github.com/Eugeny/russh)) and Svelte 5.
-Nothing is installed on the remote side.
+<p align="center">
+  <a href="https://github.com/rodrigohpalmeirim/patchbay/releases/latest"><b>Download</b></a>
+  ·
+  <a href="#features">Features</a>
+  ·
+  <a href="#install">Install</a>
+</p>
 
-**Status: pre-release.** Hosts, files, terminals and port forwarding all work and are
-covered by unit and Docker integration tests, but there has been no public release yet and
-things may still change. See [DESIGN.md](DESIGN.md) for the design decisions and milestones.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshot-dark.png">
+    <img src="assets/screenshot-light.png" width="900" alt="Patchbay showing a server's files next to a folder on this computer">
+  </picture>
+</p>
+
+Patchbay works with the SSH setup you already have. Your hosts come straight from
+`~/.ssh/config`, your keys and agent just work, and there's nothing to install on the
+servers. It runs on Windows, macOS and Linux, and it's free and open source.
 
 ## Features
 
-- **Hosts**: your `~/.ssh/config` is the host list (patterns, `Include`, `ProxyJump`,
-  forwards, ...), so `ssh` and Patchbay always agree. Adding, editing and deleting hosts
-  changes just that host's lines and keeps your comments and formatting; hosts Patchbay
-  can't safely edit (`Host a b`, read-only files) say why. Groups and tags for every host.
-  One shared connection per host with keepalive and auto-reconnect.
-- **Tailscale**: devices on your tailnet are listed automatically (when Tailscale is
-  installed), with online state; Patchbay asks once which user to log in as and remembers
-  it. Tailscale SSH works, including "check" mode's approval link, and its advertised host
-  keys are trusted.
-- **Auth**: key files (+ passphrase), SSH agent (Unix socket, Windows OpenSSH, Pageant),
-  password, keyboard-interactive / 2FA; secrets optionally stored in the OS keychain.
-- **Host keys**: shares `~/.ssh/known_hosts` (hashed entries supported), fingerprint prompt
-  for new hosts, hard warning for changed keys. Multi-hop ProxyJump bastions.
-- **Files**: tabbed SFTP browser with side-by-side panes, drag & drop, transfer queue with
-  pause/resume, conflict handling, permissions, previews, search, edit-in-place with
-  auto-upload, remote-to-remote copy. Works on SFTP-only servers.
-- **Terminal**: xterm.js tabs and splits for remote and local shells, "open terminal here",
-  snippets.
-- **Port forwarding**: local, remote, dynamic (SOCKS5) and machine-to-machine, saved as
-  named rules with auto-start and auto-reconnect; keeps running in the system tray.
-- **Session restore**, auto-updates with signed manifests.
+- **Your SSH config is your host list.** Patchbay reads `~/.ssh/config` (with `Include`,
+  patterns and `ProxyJump`), so it always agrees with `ssh`. Adding or editing a host
+  changes only that host's lines, keeping your comments and formatting. Sort hosts into
+  groups and tag them.
+- **Files.** Tabs, side-by-side panes and drag and drop, between your computer and a server
+  or between two servers. Transfers can be paused and resumed. Preview files, search, change
+  permissions, or edit a remote file in your own editor and have it upload when you save.
+  Works on SFTP-only servers too.
+- **Terminals.** Tabs and splits for remote and local shells, "open terminal here" from
+  the file browser, and saved snippets.
+- **Port forwarding.** Local, remote and SOCKS forwards, saved as named rules that can start
+  with the app and reconnect on their own. They keep running from the system tray.
+- **Tailscale.** Devices on your tailnet show up automatically, and Tailscale SSH just works.
+- **Sign-in and security.** Key files, the SSH agent (including Pageant and Windows
+  OpenSSH), passwords and two-factor prompts. Passwords can be saved in your system
+  keychain. Host keys are checked against your `known_hosts`, and you're warned loudly if
+  one changes.
+- **It picks up where you left off.** Your tabs come back when you restart, and the app
+  updates itself.
 
-## Repository layout
+## Install
 
-```
-crates/patchbay-core   SSH/SFTP/forwarding/transfers (no Tauri dependency)
-src-tauri/          Tauri app (commands/events, tray, updater)
-ui/                 Svelte 5 + TypeScript frontend
-docker/dev/         Linux dev container (Tauri deps + headless GUI tooling)
-docker/test/        Throwaway OpenSSH servers for integration tests
-scripts/            dev.sh / gui.sh helpers for the dev container
-```
+Download the latest version from the
+[releases page](https://github.com/rodrigohpalmeirim/patchbay/releases/latest).
 
-## Development
-
-Requirements: Rust stable >= 1.90 (with a C compiler, `ring` is built from source),
-Node.js 24, npm.
-
-### Core crate (any host)
-
-```sh
-cargo test -p patchbay-core
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all
-```
-
-### Desktop app
-
-On macOS and Windows install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
-and run:
-
-```sh
-npm ci
-npm run tauri dev
-```
-
-On Linux you can install the WebKitGTK prerequisites, or use the dev container, which
-needs nothing but Docker:
-
-```sh
-scripts/dev.sh npm ci
-scripts/dev.sh npm run check
-scripts/dev.sh cargo build -p patchbay
-scripts/gui.sh start                 # npm run tauri dev on a virtual X display
-scripts/gui.sh wait-window Patchbay 900
-scripts/gui.sh screenshot shot.png
-scripts/gui.sh stop
-```
-
-See [docs/dev-container.md](docs/dev-container.md) for all commands (xdotool input,
-keyring, logs, ...).
-
-### Integration tests
-
-Throwaway OpenSSH servers (plain target, bastion, SFTP-only chroot) with test-only keys:
-
-```sh
-docker compose -f docker/test/compose.yml up -d --build --wait
-PATCHBAY_DOCKER_TESTS=1 cargo test -p patchbay-core --tests
-docker compose -f docker/test/compose.yml down
-```
-
-Addresses, users, keys and sample files are documented in
-[docker/test/README.md](docker/test/README.md).
-
-## CI and releases
-
-- `.github/workflows/ci.yml`: on every push and PR, on Linux/macOS/Windows: `npm run check`,
-  `npm run build`, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`; plus an
-  integration job against the Docker SSH servers.
-- `.github/workflows/release.yml`: pushing a `v*` tag builds `.msi`/NSIS `.exe`, `.dmg`/`.app`
-  (Apple Silicon and Intel), `.AppImage`/`.deb`/`.rpm`, and uploads them with the updater's
-  `latest.json` to a **draft** GitHub release.
-
-Signing is optional and driven by repository secrets; without them builds are unsigned and
-the updater manifest is skipped:
-
-| Purpose | Secrets |
+| System | Download |
 |---|---|
-| Updater signatures | `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
-| macOS signing + notarization | `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` |
-| Windows signing (optional hook) | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` + variables `TRUSTED_SIGNING_*` |
+| Windows 10/11 | `Patchbay_<version>_x64-setup.exe` (or the `.msi`) |
+| macOS, Apple Silicon | `Patchbay_<version>_aarch64.dmg` |
+| macOS, Intel | `Patchbay_<version>_x64.dmg` |
+| Linux | `.AppImage`, `.deb` (Debian, Ubuntu) or `.rpm` (Fedora, openSUSE) |
 
-The updater public key is already in `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`);
-put the matching private key + password in the secrets above. To rotate it, generate a new
-pair with `npm run tauri signer generate -- -w ~/.tauri/patchbay.key` and replace the public key
-(existing installs then can't verify updates signed with the new key). Details: [docs/releasing.md](docs/releasing.md).
+Once installed, Patchbay keeps itself up to date.
+
+The builds aren't code-signed yet, so the first launch needs one extra step:
+
+- **Windows:** if SmartScreen says "Windows protected your PC", click **More info**, then
+  **Run anyway**.
+- **macOS:** open the app once, then go to **System Settings → Privacy & Security** and
+  click **Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/Patchbay.app`.
+- **Linux:** install the package with `sudo apt install ./Patchbay_<version>_amd64.deb` or
+  `sudo dnf install ./Patchbay-<version>-1.x86_64.rpm`, or make the AppImage executable
+  (`chmod +x Patchbay_*.AppImage`) and run it.
+
+To build Patchbay yourself, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Contributing
+
+Patchbay is young, so bug reports and ideas are very welcome. Please
+[open an issue](https://github.com/rodrigohpalmeirim/patchbay/issues). To work on the code,
+start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
