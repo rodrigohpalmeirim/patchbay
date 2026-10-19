@@ -311,8 +311,10 @@ pub(super) async fn run(
         }
     }
     drop(backend);
-    drop(out);
+    // Deregister before ending the output, so whoever sees the output end finds the
+    // terminal gone (writes fail, it is no longer listed).
     drop(finish);
+    drop(out);
 }
 
 #[cfg(test)]
