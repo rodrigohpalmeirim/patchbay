@@ -371,7 +371,8 @@ export interface SnippetDraft {
  *   viaHostId when set (machine-to-machine) (-R)
  * - dynamic: SOCKS5 proxy on this machine, connecting out from hostId (-D)
  */
-export type PortForwardKind = "local" | "remote" | "dynamic";
+/** local = -L, remote = -R, dynamic = -D (SOCKS here), remoteDynamic = -R port (SOCKS on the server). */
+export type PortForwardKind = "local" | "remote" | "dynamic" | "remoteDynamic";
 
 export interface PortForward {
   /** `fwd:<uuid>` (app) or `cfg:<alias>:<n>` (ssh_config, read-only). */

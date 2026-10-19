@@ -21,7 +21,9 @@ use crate::session::join_host_port;
 use crate::ssh_config::{ForwardEndpoint, ForwardKind, ForwardSpec};
 use crate::{Error, Result};
 
-const SCHEMA_VERSION: u32 = 1;
+/// Version 2 added the `remoteDynamic` kind. Files are written as version 1
+/// unless they use it, so older Patchbay versions keep reading them.
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,8 +174,11 @@ impl ForwardStore {
 
     /// Persist first, so memory never runs ahead of the file.
     fn commit(&mut self, rules: Vec<StoredForward>) -> Result<()> {
+        let uses_v2 = rules
+            .iter()
+            .any(|r| r.kind == PortForwardKind::RemoteDynamic);
         let body = serde_json::to_vec_pretty(&ForwardsFile {
-            version: SCHEMA_VERSION,
+            version: if uses_v2 { SCHEMA_VERSION } else { 1 },
             forwards: rules.clone(),
         })?;
         persist::write_atomic(&self.path, &body)?;
@@ -205,7 +210,7 @@ fn read_rules(path: &Path) -> Result<Vec<StoredForward>> {
 }
 
 /// Check and normalize a draft (trimmed strings, empty → `None`, IPv6
-/// brackets removed, target fields cleared for dynamic forwards, generated
+/// brackets removed, target fields cleared for SOCKS forwards, generated
 /// name if empty). `host_exists` tells whether a host id is known. The
 /// returned rule has `id` and `source` left for the caller to fill in.
 pub fn validate(
@@ -224,7 +229,7 @@ pub fn validate(
         address(draft.bind_address, true).map_err(|e| invalid(&format!("Listen address {e}")))?;
 
     let (target_host, target_port) = match draft.kind {
-        PortForwardKind::Dynamic => (None, None),
+        PortForwardKind::Dynamic | PortForwardKind::RemoteDynamic => (None, None),
         PortForwardKind::Local | PortForwardKind::Remote => {
             let host = address(draft.target_host, false)
                 .map_err(|e| invalid(&format!("Destination host {e}")))?
@@ -238,7 +243,7 @@ pub fn validate(
         }
     };
 
-    if draft.kind == PortForwardKind::Remote && draft.bind_port == 0 {
+    if draft.kind.listens_remotely() && draft.bind_port == 0 {
         return Err(invalid(
             "Remote forwards need a listen port between 1 and 65535",
         ));
@@ -249,9 +254,9 @@ pub fn validate(
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty());
     if let Some(via) = &via_host_id {
-        if draft.kind != PortForwardKind::Remote {
+        if !draft.kind.listens_remotely() {
             return Err(invalid(
-                "Only remote forwards can connect out through another host",
+                "Only forwards that listen on a server can connect out through another host",
             ));
         }
         if *via == host_id {
@@ -308,7 +313,7 @@ fn address(value: Option<String>, listen: bool) -> std::result::Result<Option<St
 }
 
 /// Short human description: `L 8080 → localhost:80`, `D 1080`,
-/// `R 0.0.0.0:9000 → db:5432 via cfg:bastion`.
+/// `R 0.0.0.0:9000 → db:5432 via cfg:bastion`, `R 1080 SOCKS`.
 pub fn describe(rule: &PortForward) -> String {
     let listen = match rule.bind_address.as_deref() {
         None => rule.bind_port.to_string(),
@@ -325,11 +330,15 @@ pub fn describe(rule: &PortForward) -> String {
             Some(via) => format!("R {listen} → {target} via {via}"),
             None => format!("R {listen} → {target}"),
         },
+        PortForwardKind::RemoteDynamic => match &rule.via_host_id {
+            Some(via) => format!("R {listen} SOCKS via {via}"),
+            None => format!("R {listen} SOCKS"),
+        },
     }
 }
 
 /// The read-only rules for ssh_config host `alias`, plus warnings for
-/// forwards Patchbay cannot run (Unix sockets, remote SOCKS, remote port 0).
+/// forwards Patchbay cannot run (Unix sockets, remote port 0).
 pub fn config_rules(alias: &str, specs: &[ForwardSpec]) -> (Vec<PortForward>, Vec<String>) {
     let mut rules = Vec::new();
     let mut warnings = Vec::new();
@@ -345,22 +354,20 @@ pub fn config_rules(alias: &str, specs: &[ForwardSpec]) -> (Vec<PortForward>, Ve
             skip("Unix-domain socket forwarding is not supported");
             continue;
         };
-        let (target_host, target_port) = match (&spec.connect, spec.kind) {
-            (Some(ForwardEndpoint::Tcp { host, port }), _) => (host.clone(), Some(*port)),
-            (Some(ForwardEndpoint::Unix(_)), _) => {
+        let (target_host, target_port) = match &spec.connect {
+            Some(ForwardEndpoint::Tcp { host, port }) => (host.clone(), Some(*port)),
+            Some(ForwardEndpoint::Unix(_)) => {
                 skip("Unix-domain socket forwarding is not supported");
                 continue;
             }
-            (None, ForwardKind::Remote) => {
-                skip("remote SOCKS proxies are not supported");
-                continue;
-            }
-            (None, _) => (None, None),
+            None => (None, None),
         };
-        let kind = match spec.kind {
-            ForwardKind::Local => PortForwardKind::Local,
-            ForwardKind::Remote => PortForwardKind::Remote,
-            ForwardKind::Dynamic => PortForwardKind::Dynamic,
+        let kind = match (spec.kind, &spec.connect) {
+            (ForwardKind::Local, _) => PortForwardKind::Local,
+            // `RemoteForward [addr:]port` without a destination: a SOCKS proxy on the server.
+            (ForwardKind::Remote, None) => PortForwardKind::RemoteDynamic,
+            (ForwardKind::Remote, Some(_)) => PortForwardKind::Remote,
+            (ForwardKind::Dynamic, _) => PortForwardKind::Dynamic,
         };
         let bind_address = host.as_ref().map(|h| {
             if h.is_empty() {
@@ -542,13 +549,15 @@ mod tests {
                 .contains("between 1 and 65535")
             );
         }
-        assert!(
-            err(PortForwardDraft {
-                bind_port: 0,
-                ..draft(Remote)
-            })
-            .contains("listen port")
-        );
+        for kind in [Remote, RemoteDynamic] {
+            assert!(
+                err(PortForwardDraft {
+                    bind_port: 0,
+                    ..draft(kind)
+                })
+                .contains("listen port")
+            );
+        }
         assert!(
             validate(
                 PortForwardDraft {
@@ -565,16 +574,29 @@ mod tests {
                     via_host_id: Some("app:b".into()),
                     ..draft(kind)
                 })
-                .contains("Only remote")
+                .contains("Only forwards that listen on a server")
             );
         }
-        assert!(
-            err(PortForwardDraft {
-                via_host_id: Some("cfg:a".into()),
-                ..draft(Remote)
-            })
-            .contains("must differ")
-        );
+        for kind in [Remote, RemoteDynamic] {
+            assert!(
+                err(PortForwardDraft {
+                    via_host_id: Some("cfg:a".into()),
+                    ..draft(kind)
+                })
+                .contains("must differ")
+            );
+        }
+        // A SOCKS proxy on the server, going online from another host.
+        let rule = validate(
+            PortForwardDraft {
+                via_host_id: Some("app:b".into()),
+                ..draft(RemoteDynamic)
+            },
+            known,
+        )
+        .unwrap();
+        assert_eq!((rule.target_host, rule.target_port), (None, None));
+        assert_eq!(rule.name, "R 8080 SOCKS via app:b");
         assert!(matches!(
             validate(
                 PortForwardDraft {
@@ -663,7 +685,19 @@ mod tests {
         assert!(matches!(store.delete(&created.id), Err(Error::NotFound(_))));
         assert!(ForwardStore::load(path.clone()).unwrap().list().is_empty());
 
-        fs::write(&path, r#"{"version": 2, "forwards": []}"#).unwrap();
+        // Version 2 only when a rule needs it, so older versions keep reading the file.
+        let rule = validate(draft(PortForwardKind::RemoteDynamic), known).unwrap();
+        let created = store.create(rule).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["version"], 2);
+        assert_eq!(json["forwards"][0]["kind"], "remoteDynamic");
+        assert_eq!(
+            ForwardStore::load(path.clone()).unwrap().get(&created.id),
+            Some(created)
+        );
+
+        fs::write(&path, r#"{"version": 3, "forwards": []}"#).unwrap();
         assert!(ForwardStore::load(path).is_err());
     }
 
@@ -687,6 +721,7 @@ mod tests {
             [
                 ("cfg:f:1", "f: L 8080 → localhost:80"),
                 ("cfg:f:2", "f: L [::1]:9000 → [fe80::1]:22"),
+                ("cfg:f:4", "f: R 1080 SOCKS"),
                 ("cfg:f:5", "f: D *:1081"),
                 ("cfg:f:6", "f: R 9000 → db:5432"),
             ]
@@ -698,12 +733,12 @@ mod tests {
                     && !r.auto_start
                     && r.host_id == "cfg:f")
         );
-        assert_eq!(rules[2].kind, PortForwardKind::Dynamic);
-        assert_eq!(rules[3].kind, PortForwardKind::Remote);
-        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        assert_eq!(rules[2].kind, PortForwardKind::RemoteDynamic);
+        assert_eq!(rules[3].kind, PortForwardKind::Dynamic);
+        assert_eq!(rules[4].kind, PortForwardKind::Remote);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
         assert!(warnings[0].contains("RemoteForward #3") && warnings[0].contains("Unix"));
-        assert!(warnings[1].contains("remote SOCKS"));
-        assert!(warnings[2].contains("RemoteForward #7"));
-        assert!(warnings[3].contains("LocalForward #8"));
+        assert!(warnings[1].contains("RemoteForward #7"));
+        assert!(warnings[2].contains("LocalForward #8"));
     }
 }

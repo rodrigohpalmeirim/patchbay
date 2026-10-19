@@ -1104,6 +1104,21 @@ pub enum PortForwardKind {
     Remote,
     /// `-D`: SOCKS5 proxy listening on this machine, connecting out from `host_id`.
     Dynamic,
+    /// `-R port` (no destination): SOCKS5 proxy listening on `host_id`,
+    /// connecting out from this machine, or from `via_host_id` when set.
+    RemoteDynamic,
+}
+
+impl PortForwardKind {
+    /// Listens on `host_id` (rather than on this machine).
+    pub fn listens_remotely(self) -> bool {
+        matches!(self, Self::Remote | Self::RemoteDynamic)
+    }
+
+    /// A SOCKS proxy: the destination is chosen per connection.
+    pub fn is_socks(self) -> bool {
+        matches!(self, Self::Dynamic | Self::RemoteDynamic)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1126,15 +1141,15 @@ pub struct PortForward {
     /// SSH host carrying the tunnel.
     pub host_id: HostId,
     /// Listen address: on this machine for local/dynamic, on `host_id` for
-    /// remote. `None` = loopback.
+    /// remote/remoteDynamic. `None` = loopback.
     pub bind_address: Option<String>,
     /// `0` = pick a free port (local/dynamic only).
     pub bind_port: u16,
-    /// Destination for local/remote forwards (unused for dynamic).
+    /// Destination for local/remote forwards (unused for the SOCKS kinds).
     pub target_host: Option<String>,
     pub target_port: Option<u16>,
-    /// Remote forwards only: open the outgoing connections from this other
-    /// SSH host instead of this machine.
+    /// Remote and remoteDynamic only: open the outgoing connections from this
+    /// other SSH host instead of this machine.
     pub via_host_id: Option<HostId>,
     /// Start when Patchbay starts (and keep reconnecting while enabled).
     pub auto_start: bool,

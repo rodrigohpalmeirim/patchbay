@@ -38,8 +38,9 @@ servers. It runs on Windows, macOS and Linux, and it's free and open source.
   Works on SFTP-only servers too.
 - **Terminals.** Tabs and splits for remote and local shells, "open terminal here" from
   the file browser, and saved snippets.
-- **Port forwarding.** Local, remote and SOCKS forwards, saved as named rules that can start
-  with the app and reconnect on their own. They keep running from the system tray.
+- **Port forwarding.** Open a server's port on your computer or yours on a server, relay
+  between two servers, or run a SOCKS proxy on either end. Forwards are saved as named rules
+  that can start with the app and reconnect on their own, and keep running from the system tray.
 - **Tailscale.** Devices on your tailnet show up automatically, and Tailscale SSH just works.
 - **Sign-in and security.** Key files, the SSH agent (including Pageant and Windows
   OpenSSH), passwords and two-factor prompts. Passwords can be saved in your system

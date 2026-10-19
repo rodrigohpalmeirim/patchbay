@@ -33,6 +33,9 @@ const PROD_WEB = "cfg:prod-web-01";
 const STAGING = "cfg:staging-api";
 const WIN = "cfg:win-buildbox";
 
+const remoteListen = (k: PortForward["kind"]) => k === "remote" || k === "remoteDynamic";
+const socks = (k: PortForward["kind"]) => k === "dynamic" || k === "remoteDynamic";
+
 const rule = (r: Partial<PortForward> & Pick<PortForward, "id" | "name" | "kind" | "hostId" | "bindPort">): PortForward => ({
   source: "app",
   bindAddress: null,
@@ -87,6 +90,13 @@ const INITIAL: PortForward[] = [
     name: "SOCKS proxy",
     kind: "dynamic",
     hostId: PROD_WEB,
+    bindPort: 1080,
+  }),
+  rule({
+    id: "fwd:5d1e9a70-home-socks",
+    name: "Home network for staging",
+    kind: "remoteDynamic",
+    hostId: STAGING,
     bindPort: 1080,
   }),
   rule({
@@ -181,7 +191,7 @@ interface Runtime {
 
 /** Bytes per second-ish and connection churn by service. */
 function profile(f: PortForward): { rate: number; churn: number; maxOpen: number } {
-  if (f.kind === "dynamic") return { rate: 180_000, churn: 0.55, maxOpen: 9 };
+  if (socks(f.kind)) return { rate: 180_000, churn: 0.55, maxOpen: 9 };
   switch (f.targetPort) {
     case 5432:
     case 3306:
@@ -250,7 +260,7 @@ export function createForwards(deps: ForwardsDeps) {
   const loopback = (addr: string | null) => addr ?? "127.0.0.1";
 
   function address(f: PortForward, r: Runtime): string {
-    if (f.kind === "remote") return `${f.bindAddress ?? "localhost"}:${f.bindPort}`;
+    if (remoteListen(f.kind)) return `${f.bindAddress ?? "localhost"}:${f.bindPort}`;
     if (f.bindPort === 0) r.autoPort ??= 49152 + Math.floor(Math.random() * 16000);
     return `${loopback(f.bindAddress)}:${f.bindPort || r.autoPort}`;
   }
@@ -284,10 +294,10 @@ export function createForwards(deps: ForwardsDeps) {
   }
 
   /** Hosts a forward needs connected. */
-  const hostsOf = (f: PortForward): HostId[] => (f.kind === "remote" && f.viaHostId ? [f.hostId, f.viaHostId] : [f.hostId]);
+  const hostsOf = (f: PortForward): HostId[] => (f.viaHostId ? [f.hostId, f.viaHostId] : [f.hostId]);
 
   function bindError(f: PortForward): string | null {
-    if (f.kind === "remote") {
+    if (remoteListen(f.kind)) {
       if (f.bindPort < 1024 && deps.host(f.hostId)?.user !== "root") {
         return `remote port forwarding failed for listen port ${f.bindPort}: the server refused (ports below 1024 need root)`;
       }
@@ -300,7 +310,7 @@ export function createForwards(deps: ForwardsDeps) {
     const clash = rules.find(
       (o) =>
         o.id !== f.id &&
-        o.kind !== "remote" &&
+        !remoteListen(o.kind) &&
         o.bindPort === port &&
         ["active", "starting", "reconnecting"].includes(rt(o.id).status.state),
     );
@@ -397,13 +407,13 @@ export function createForwards(deps: ForwardsDeps) {
         throw deps.err("other", `${what} must be between ${allowZero ? 0 : 1} and 65535`);
       return p;
     };
-    port(d.bindPort, "bind port", d.kind !== "remote");
-    if (d.kind !== "dynamic") {
+    port(d.bindPort, "bind port", !remoteListen(d.kind));
+    if (!socks(d.kind)) {
       if (!d.targetHost?.trim()) throw deps.err("other", "target host must not be empty");
       port(d.targetPort, "target port", false);
     }
     if (d.viaHostId) {
-      if (d.kind !== "remote") throw deps.err("other", "only remote forwards can connect from another host");
+      if (!remoteListen(d.kind)) throw deps.err("other", "only forwards that listen on a server can connect out through another host");
       if (d.viaHostId === d.hostId) throw deps.err("other", "a forward can't connect from the host it listens on");
       if (!deps.host(d.viaHostId)) throw deps.err("unknownHost", `unknown host: ${d.viaHostId}`);
     }
@@ -417,9 +427,9 @@ export function createForwards(deps: ForwardsDeps) {
       hostId: d.hostId,
       bindAddress: d.bindAddress?.trim() || null,
       bindPort: d.bindPort,
-      targetHost: d.kind === "dynamic" ? null : (d.targetHost?.trim() ?? null),
-      targetPort: d.kind === "dynamic" ? null : d.targetPort,
-      viaHostId: d.kind === "remote" ? d.viaHostId : null,
+      targetHost: socks(d.kind) ? null : (d.targetHost?.trim() ?? null),
+      targetPort: socks(d.kind) ? null : d.targetPort,
+      viaHostId: remoteListen(d.kind) ? d.viaHostId : null,
       autoStart: d.autoStart,
     };
   }

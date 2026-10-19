@@ -20,7 +20,7 @@
   import type { PortForward } from "../types";
   import { sentence } from "../util/errors";
   import { formatBytes, formatSpeed } from "../util/format";
-  import { browserUrl, copyAddress, describeRoute, editForward, KIND_FLAG, KIND_LABEL, machineName, showForwardMenu } from "./ops";
+  import { browserUrl, copyAddress, describeRoute, editForward, KIND_FLAG, KIND_LABEL, listensRemotely, machineName, showForwardMenu } from "./ops";
   import { openInBrowser } from "../util/links";
 
   let {
@@ -58,7 +58,7 @@
 
   /** While starting, say what the host connection is doing. */
   const startingLabel = $derived.by(() => {
-    const ids = f.kind === "remote" && f.viaHostId ? [f.hostId, f.viaHostId] : [f.hostId];
+    const ids = f.viaHostId ? [f.hostId, f.viaHostId] : [f.hostId];
     for (const id of ids) {
       if (prompts.isWaiting(id)) return `Waiting for your input (${machineName(id)})…`;
       const phase = connections.get(id).phase;
@@ -67,7 +67,7 @@
     return "Starting…";
   });
 
-  const listenOn = $derived(s.state === "active" ? (f.kind === "remote" ? `${s.address} on ${machineName(f.hostId)}` : s.address) : "");
+  const listenOn = $derived(s.state === "active" ? (listensRemotely(f.kind) ? `${s.address} on ${machineName(f.hostId)}` : s.address) : "");
 
   function onkeydown(e: KeyboardEvent) {
     if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
@@ -102,7 +102,7 @@
       {:else}
         <span class="name">{f.name}</span>
       {/if}
-      <span class="kind" title="{KIND_LABEL[f.kind]} forward (ssh {KIND_FLAG[f.kind]})">{f.kind === "dynamic" ? "SOCKS" : KIND_LABEL[f.kind]}</span>
+      <span class="kind" title="{KIND_LABEL[f.kind]} forward (ssh {KIND_FLAG[f.kind]})">{f.kind === "dynamic" ? "SOCKS" : f.kind === "remoteDynamic" ? "Remote SOCKS" : KIND_LABEL[f.kind]}</span>
       {#if f.source === "sshConfig"}
         <span class="tag" title="Defined in ~/.ssh/config (read-only)"><FileText size={10} /> SSH config</span>
       {/if}

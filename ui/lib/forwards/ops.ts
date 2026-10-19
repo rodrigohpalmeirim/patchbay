@@ -22,10 +22,16 @@ export const KIND_LABEL: Record<PortForwardKind, string> = {
   local: "Local",
   remote: "Remote",
   dynamic: "SOCKS proxy",
+  remoteDynamic: "Remote SOCKS proxy",
 };
 
 /** ssh-style flag, shown as a hint. */
-export const KIND_FLAG: Record<PortForwardKind, string> = { local: "-L", remote: "-R", dynamic: "-D" };
+export const KIND_FLAG: Record<PortForwardKind, string> = { local: "-L", remote: "-R", dynamic: "-D", remoteDynamic: "-R" };
+
+/** Listens on the server (`hostId`) rather than on this computer. */
+export const listensRemotely = (kind: PortForwardKind) => kind === "remote" || kind === "remoteDynamic";
+/** A SOCKS proxy: the destination is picked per connection. */
+export const isSocks = (kind: PortForwardKind) => kind === "dynamic" || kind === "remoteDynamic";
 
 export function isLoopback(addr: string | null | undefined): boolean {
   if (!addr) return true;
@@ -50,7 +56,7 @@ export function machineName(id: HostId | null): string {
 /** Where a forward listens, e.g. "localhost:5432", "0.0.0.0:8080", "prod-web-01:8080". */
 export function listenLabel(f: PortForward): string {
   const port = f.bindPort || "auto";
-  if (f.kind === "remote") {
+  if (listensRemotely(f.kind)) {
     const host = machineName(f.hostId);
     return isLoopback(f.bindAddress) ? hostPort(host, port) : `${hostPort(f.bindAddress!, port)} on ${host}`;
   }
@@ -74,13 +80,14 @@ export interface Route {
  * Compact human description:
  *   local     localhost:5432 → db.internal:5432 via bastion
  *   dynamic   SOCKS5 on localhost:1080 through prod-web-01
+ *   remoteDynamic  SOCKS5 on prod-web-01:1080 through this computer
  *   remote    prod-web-01:8080 → raspberrypi:80          (machine-to-machine)
  *             staging-api:8080 → localhost:5173 on this computer
  */
 export function describeRoute(f: PortForward): Route {
   const from = listenLabel(f);
-  if (f.kind === "dynamic") {
-    const via = machineName(f.hostId);
+  if (isSocks(f.kind)) {
+    const via = f.kind === "dynamic" ? machineName(f.hostId) : machineName(f.viaHostId);
     return { from: `SOCKS5 on ${from}`, to: null, via, viaLabel: `through ${via}`, text: `SOCKS5 proxy on ${from} through ${via}` };
   }
   const target = f.targetHost ?? "localhost";
@@ -107,8 +114,8 @@ export function describeRoute(f: PortForward): Route {
 
 /** Address a client should use: the live one when running, else the configured one. */
 export function forwardAddress(f: PortForward, s?: PortForwardStatus): string {
-  if (s?.state === "active" && f.kind !== "remote") return s.address;
-  if (f.kind === "remote") return hostPort(f.bindAddress ?? "localhost", f.bindPort);
+  if (s?.state === "active" && !listensRemotely(f.kind)) return s.address;
+  if (listensRemotely(f.kind)) return hostPort(f.bindAddress ?? "localhost", f.bindPort);
   return hostPort(f.bindAddress ?? "127.0.0.1", f.bindPort || 0);
 }
 

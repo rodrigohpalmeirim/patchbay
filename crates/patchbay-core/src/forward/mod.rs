@@ -18,6 +18,10 @@
 //!   address `localhost`) and connects each forwarded connection to the
 //!   destination from this machine, or, with `via_host_id`, through a
 //!   `direct-tcpip` channel on that other host (machine-to-machine).
+//! - **RemoteDynamic** (`-R port` without a destination): listens on the
+//!   host like a remote forward, but each forwarded connection is a SOCKS
+//!   client; its `CONNECT` is opened from this machine, or through
+//!   `via_host_id`.
 //!
 //! Byte counts are from the point of view of the connecting client:
 //! `bytes_out` flows towards the destination, `bytes_in` back.
@@ -482,15 +486,13 @@ impl Runner {
 
     /// Runs until stopped or failed; the result says which.
     async fn run_inner(&mut self, links: &mut Links) -> Halt {
-        let listeners = match self.rule.kind {
-            PortForwardKind::Local | PortForwardKind::Dynamic => {
-                match Listeners::bind(self.rule.bind_address.as_deref(), self.rule.bind_port).await
-                {
-                    Ok(l) => Some(l),
-                    Err(e) => return Halt::Fail(e),
-                }
+        let listeners = if self.rule.kind.listens_remotely() {
+            None
+        } else {
+            match Listeners::bind(self.rule.bind_address.as_deref(), self.rule.bind_port).await {
+                Ok(l) => Some(l),
+                Err(e) => return Halt::Fail(e),
             }
-            PortForwardKind::Remote => None,
         };
         // `None` while starting; afterwards the reason of the last loss.
         let mut lost_reason: Option<String> = None;
@@ -563,7 +565,7 @@ impl Runner {
         let main = self.ensure(&host, links.main.take(), lost_reason).await?;
         links.main = Some(main.clone());
 
-        if self.rule.kind == PortForwardKind::Remote && links.remote.is_none() {
+        if self.rule.kind.listens_remotely() && links.remote.is_none() {
             let address = self.rule.bind_address.as_deref().unwrap_or("localhost");
             match main.forward_remote(address, self.rule.bind_port).await {
                 Ok(listener) => links.remote = Some(listener),
@@ -671,7 +673,12 @@ impl Runner {
                     }
                 },
                 Some(forwarded) = next_forwarded(links.remote.as_mut()) => {
-                    tunnels.spawn(remote_connection(forwarded, via.clone(), target.clone(), self.cell.clone()));
+                    let cell = self.cell.clone();
+                    if self.rule.kind == PortForwardKind::RemoteDynamic {
+                        tunnels.spawn(remote_socks_connection(forwarded, via.clone(), cell));
+                    } else {
+                        tunnels.spawn(remote_connection(forwarded, via.clone(), target.clone(), cell));
+                    }
                 }
                 Some(_) = tunnels.join_next(), if !tunnels.is_empty() => {}
             }
@@ -792,12 +799,10 @@ async fn remote_connection(
     let destination = join_host_port(&host, port);
     match via {
         Some(via) => {
-            let (address, origin_port) = forwarded.originator();
-            let originator = format!("{address}:{origin_port}")
-                .parse::<SocketAddr>()
-                .or_else(|_| join_host_port(address, origin_port as u16).parse())
-                .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 0)));
-            match via.open_direct_tcpip(&host, port, originator).await {
+            match via
+                .open_direct_tcpip(&host, port, originator(&forwarded))
+                .await
+            {
                 Ok(outgoing) => {
                     let incoming = forwarded.accept().await;
                     pump::pump(incoming.into_stream(), outgoing.into_stream(), &cell).await;
@@ -832,4 +837,87 @@ async fn remote_connection(
             }
         }
     }
+}
+
+/// The client of a forwarded connection, as reported by the server (for the
+/// `direct-tcpip` request made on its behalf).
+fn originator(forwarded: &ForwardedTcpip) -> SocketAddr {
+    let (address, port) = forwarded.originator();
+    format!("{address}:{port}")
+        .parse::<SocketAddr>()
+        .or_else(|_| join_host_port(address, port as u16).parse())
+        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 0)))
+}
+
+/// A SOCKS client that connected to a proxy listening on the server: read
+/// its request on the forwarded channel, then connect from this machine or
+/// through `via`.
+async fn remote_socks_connection(
+    forwarded: ForwardedTcpip,
+    via: Option<Arc<Connection>>,
+    cell: Arc<StatusCell>,
+) {
+    let peer = originator(&forwarded);
+    let mut incoming = forwarded.accept().await.into_stream();
+    let request = match tokio::time::timeout(SOCKS_TIMEOUT, socks::handshake(&mut incoming)).await {
+        Ok(Ok(request)) => request,
+        Ok(Err(e)) => {
+            tracing::debug!(forward = %cell.id(), %peer, "SOCKS handshake failed: {e}");
+            return;
+        }
+        Err(_) => {
+            tracing::debug!(forward = %cell.id(), %peer, "SOCKS client sent no request");
+            return;
+        }
+    };
+    let _guard = cell.connection();
+    let destination = join_host_port(&request.host, request.port);
+    let failure = |reply: socks::Reply, why: String| {
+        tracing::info!(forward = %cell.id(), "SOCKS: cannot reach {destination}: {why}");
+        reply
+    };
+    let reply = match via {
+        Some(via) => match via
+            .open_direct_tcpip(&request.host, request.port, peer)
+            .await
+        {
+            Ok(channel) => {
+                if socks::reply(&mut incoming, request.version, socks::Reply::Succeeded)
+                    .await
+                    .is_ok()
+                {
+                    pump::pump(incoming, channel.into_stream(), &cell).await;
+                }
+                return;
+            }
+            Err(e) => failure(
+                socks_failure(&e),
+                format!("from {}: {e}", via.target().label),
+            ),
+        },
+        None => {
+            let connect = TcpStream::connect((request.host.as_str(), request.port));
+            match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+                Ok(Ok(socket)) => {
+                    let _ = socket.set_nodelay(true);
+                    if socks::reply(&mut incoming, request.version, socks::Reply::Succeeded)
+                        .await
+                        .is_ok()
+                    {
+                        pump::pump(incoming, socket, &cell).await;
+                    }
+                    return;
+                }
+                Ok(Err(e)) => {
+                    let reply = match e.kind() {
+                        std::io::ErrorKind::ConnectionRefused => socks::Reply::ConnectionRefused,
+                        _ => socks::Reply::HostUnreachable,
+                    };
+                    failure(reply, e.to_string())
+                }
+                Err(_) => failure(socks::Reply::HostUnreachable, "timed out".into()),
+            }
+        }
+    };
+    let _ = socks::reply(&mut incoming, request.version, reply).await;
 }

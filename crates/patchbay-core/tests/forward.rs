@@ -519,6 +519,109 @@ async fn machine_to_machine() {
     );
 }
 
+/// Send a SOCKS5 `CONNECT` to `host:port` over `stream`; returns the reply code.
+async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> u8 {
+    stream.write_all(&[5, 1, 0]).await.unwrap();
+    let mut greeting = [0u8; 2];
+    timed(stream.read_exact(&mut greeting)).await.unwrap();
+    assert_eq!(greeting, [5, 0]);
+    let mut req = vec![5, 1, 0, 3, host.len() as u8];
+    req.extend_from_slice(host.as_bytes());
+    req.extend_from_slice(&port.to_be_bytes());
+    stream.write_all(&req).await.unwrap();
+    let mut reply = [0u8; 10];
+    timed(stream.read_exact(&mut reply)).await.unwrap();
+    assert_eq!(reply[0], 5, "{reply:?}");
+    reply[1]
+}
+
+/// Starts a local forward to `localhost:port` on `host`, so the test can
+/// reach a listener there; returns its address.
+async fn reach_remote_port(fx: &Fx, host: &str, port: u16) -> String {
+    let rule = fx
+        .create(PortForwardDraft {
+            target_port: Some(port),
+            ..draft(PortForwardKind::Local, host)
+        })
+        .await;
+    active_address(&timed(fx.forwards.start(&rule.id)).await.unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_socks_proxy() {
+    require_docker!();
+    let fx = Fx::friendly();
+    let echo = echo_server().await;
+    let port = remote_port();
+    let rule = fx
+        .create(PortForwardDraft {
+            bind_port: port,
+            target_host: None,
+            target_port: None,
+            ..draft(PortForwardKind::RemoteDynamic, "cfg:target")
+        })
+        .await;
+    assert_eq!(rule.name, format!("R {port} SOCKS"));
+    let status = timed(fx.forwards.start(&rule.id)).await.unwrap();
+    assert_eq!(active_address(&status), format!("localhost:{port}"));
+    let proxy = reach_remote_port(&fx, "cfg:target", port).await;
+
+    // Requests made on the server go out from this machine: our echo server.
+    let mut s = timed(TcpStream::connect(&proxy)).await.unwrap();
+    assert_eq!(socks5_connect(&mut s, "127.0.0.1", echo).await, 0);
+    s.write_all(b"patchbay-echo").await.unwrap();
+    let mut buf = [0u8; 13];
+    timed(s.read_exact(&mut buf)).await.unwrap();
+    assert_eq!(&buf, b"patchbay-echo");
+    drop(s);
+
+    // A closed port here: connection refused.
+    let mut s = timed(TcpStream::connect(&proxy)).await.unwrap();
+    assert_eq!(socks5_connect(&mut s, "127.0.0.1", 1).await, 5);
+    drop(s);
+
+    let s = fx
+        .wait_status(&rule.id, |s| {
+            s.total_connections == 2 && s.open_connections == 0
+        })
+        .await;
+    assert_eq!((s.bytes_out, s.bytes_in), (13, 13));
+    timed(fx.forwards.stop(&rule.id)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_socks_proxy_through_another_host() {
+    require_docker!();
+    let fx = Fx::friendly();
+    let port = remote_port();
+    let rule = fx
+        .create(PortForwardDraft {
+            bind_port: port,
+            target_host: None,
+            target_port: None,
+            via_host_id: Some("cfg:bastion".into()),
+            ..draft(PortForwardKind::RemoteDynamic, "cfg:target")
+        })
+        .await;
+    timed(fx.forwards.start(&rule.id)).await.unwrap();
+    assert!(
+        fx.sessions.get("cfg:bastion").is_some(),
+        "via host connected"
+    );
+    let proxy = reach_remote_port(&fx, "cfg:target", port).await;
+
+    // localhost as seen from the bastion: its sshd.
+    let mut s = timed(TcpStream::connect(&proxy)).await.unwrap();
+    assert_eq!(socks5_connect(&mut s, "localhost", 22).await, 0);
+    assert!(read_line(&mut s).await.starts_with("SSH-2.0-OpenSSH"));
+    drop(s);
+
+    // Disconnecting the via host on purpose stops the forward.
+    fx.sessions.disconnect("cfg:bastion").await;
+    fx.wait_status(&rule.id, |s| s.state == PortForwardState::Stopped)
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn forwarding_refused_by_server() {
     require_docker!();
