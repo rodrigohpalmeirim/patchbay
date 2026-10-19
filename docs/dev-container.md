@@ -72,6 +72,34 @@ Notes:
   `PATCHBAY_DOCKER_TESTS=1`, and make `127.0.0.1:2201-2203` on the Windows machine reach the
   test containers (e.g. `ssh -N -R 2201:127.0.0.1:2201 -R 2202:... -R 2203:... <windows-host>`).
 
+## scripts/windev.sh - live dev build on a Windows machine
+
+Runs the app on a real Windows PC while the code stays here: UI changes hot-reload, and
+Rust changes trigger a rebuild that the Windows side picks up and restarts automatically.
+
+```sh
+scripts/windev.sh start [HOST]   # HOST: address the Windows PC uses to reach this machine
+                                 # (default: its first IP, e.g. the LAN address)
+scripts/windev.sh logs -f        # vite + build output
+scripts/windev.sh rebuild        # force a rebuild
+scripts/windev.sh status | stop
+```
+
+Then, on the Windows PC, in PowerShell:
+
+```powershell
+irm http://HOST:1422/run.ps1 | iex
+```
+
+The `patchbay-windev` container runs Vite on ports 1420/1421, cross-compiles a debug build
+(`cargo xwin`, target dir `/cache/target/windev`) whenever Rust sources change, and serves it on
+port 1422. The launcher downloads it to `%LOCALAPPDATA%\PatchbayDev`, runs it with its console
+output in the PowerShell window, and restarts it on each new build. The dev build loads its UI
+from `http://HOST:1420`, has DevTools (right-click → Inspect), and is called "Patchbay Dev"
+with its own identifier, so it keeps separate app data and runs next to an installed Patchbay.
+It edits the real `~/.ssh/config` of the Windows user. Ports 1420/1421 are shared with
+`scripts/gui.sh start`, so run only one of them at a time.
+
 ## scripts/gui.sh - headless GUI session
 
 `scripts/gui.sh start` launches a long-lived container (`patchbay-gui`) running
