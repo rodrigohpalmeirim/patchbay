@@ -7,12 +7,19 @@
 // `hostId: null` means "this computer" (local files and shells); for the
 // forwards kind it means "all hosts".
 //
-// Split view: tabs live in one or two *groups* shown side by side, each with
-// its own strip and active tab. `list` holds every tab (lookup + render
-// order), `groups` holds the per-group ordering. Panels for all tabs are
-// rendered in one keyed list and only positioned per group, so moving a tab
-// between groups never remounts its view (terminals etc. survive).
-// Tabs are all kept mounted (inactive ones are hidden).
+// Split view: tabs live in *groups*, each with its own strip and active tab,
+// laid out by a split tree (util/splitTree.ts) whose leaves are the groups.
+// `list` holds every tab (lookup + render order), `groups` the per-group
+// ordering. Panels for all tabs are rendered in one keyed list and only
+// positioned per group, so moving a tab between groups never remounts its
+// view (terminals etc. survive). Tabs are all kept mounted (inactive ones are
+// hidden). A group that loses its last tab is removed; its neighbour takes
+// the space.
+//
+// Preview tabs: views you pass through (host overviews, port forwards) open
+// as a group's *preview* tab, which the next preview in that group replaces,
+// so clicking through hosts doesn't pile up tabs. A preview becomes a normal
+// tab once it is kept: opened again without `preview`, double-clicked or moved.
 //
 // Session restore (stores/session.svelte.ts) brings tabs back *dormant*:
 // views skip connecting / starting shells until the tab is first shown
@@ -20,6 +27,18 @@
 
 import type { PaneNode } from "../terminal/layout";
 import type { HostId } from "../types";
+import {
+  clampRatio,
+  dirAxis,
+  findSplit,
+  leaves,
+  neighbor,
+  newId,
+  removeLeaf,
+  splitLeaf,
+  type Direction,
+  type Tree,
+} from "../util/splitTree";
 
 interface TabBase {
   id: string;
@@ -65,38 +84,63 @@ export interface Group {
   id: string;
   tabIds: string[];
   activeId: string | null;
+  /** The group's preview tab, if any (see the header). */
+  previewId: string | null;
 }
+
+export interface GroupLeaf {
+  type: "group";
+  id: string;
+}
+
+export type GroupNode = Tree<GroupLeaf>;
+
+/**
+ * Where a tab goes: a group id, "beside" the focused group (a neighbouring
+ * group, or a new one on the right), or a new group split off `of` (default:
+ * the focused group) on the `split` side.
+ */
+export type Placement = string | "beside" | { split: Direction; of?: string };
 
 /** Tab kinds that may only be open once per host (re-opening focuses it). */
 const SINGLETON: ReadonlySet<TabKind> = new Set<TabKind>(["host", "forwards"]);
-
-let seq = 0;
-const newId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${(seq++).toString(36)}`;
 
 type TabSpec = Tab extends infer T ? (T extends Tab ? Omit<T, "id"> : never) : never;
 
 export interface OpenOptions {
   activate?: boolean;
-  /** Target group: an index, "other" (creates the split if needed) or the focused one. */
-  group?: number | "other";
+  /** Target group (default: the focused one). */
+  group?: Placement;
+  /** Open as (or replace) the group's preview tab. */
+  preview?: boolean;
 }
 
-export const SPLIT_MIN = 0.2;
-export const SPLIT_MAX = 0.8;
+/** Smallest group size (px) a split may leave. */
+export const GROUP_MIN_W = 240;
+export const GROUP_MIN_H = 160;
+
+const emptyGroup = (): Group => ({ id: newId("group"), tabIds: [], activeId: null, previewId: null });
 
 class Tabs {
   list = $state<Tab[]>([]);
-  groups = $state<Group[]>([{ id: newId("group"), tabIds: [], activeId: null }]);
-  /** Index of the group that has keyboard focus / receives new tabs. */
-  focused = $state(0);
-  /** Width fraction of the left group when split. */
-  splitRatio = $state(0.5);
+  groups = $state<Group[]>([emptyGroup()]);
+  layout = $state<GroupNode>({ type: "group", id: "" });
+  /** Group that has keyboard focus / receives new tabs. */
+  focusedGroup = $state("");
   /** Restored tabs that haven't been shown yet (see the header). */
   dormant = $state<Record<string, true>>({});
 
+  constructor() {
+    this.layout = { type: "group", id: this.groups[0].id };
+    this.focusedGroup = this.groups[0].id;
+  }
+
   byId = $derived(new Map(this.list.map((t) => [t.id, t])));
+  #groupById = $derived(new Map(this.groups.map((g) => [g.id, g])));
   isSplit = $derived(this.groups.length > 1);
-  activeId = $derived<string | null>(this.groups[this.focused]?.activeId ?? null);
+  /** Group ids in layout order (left to right, top to bottom). */
+  order = $derived(leaves(this.layout).map((l) => l.id));
+  activeId = $derived<string | null>(this.group(this.focusedGroup)?.activeId ?? null);
   active = $derived<Tab | null>((this.activeId && this.byId.get(this.activeId)) || null);
   activeHostId = $derived<HostId | null>(this.active?.hostId ?? null);
   /** Active tab of every group. */
@@ -108,61 +152,88 @@ class Tabs {
     return this.byId.get(id);
   }
 
-  groupOf(id: string): number {
-    return this.groups.findIndex((g) => g.tabIds.includes(id));
+  group(id: string): Group | undefined {
+    return this.#groupById.get(id);
   }
 
-  tabsIn(group: number): Tab[] {
-    return (this.groups[group]?.tabIds ?? []).map((id) => this.byId.get(id)).filter((t): t is Tab => !!t);
+  /** Id of the group holding a tab. */
+  groupOf(id: string): string | undefined {
+    return this.groups.find((g) => g.tabIds.includes(id))?.id;
+  }
+
+  tabsIn(group: string): Tab[] {
+    return (this.group(group)?.tabIds ?? []).map((id) => this.byId.get(id)).filter((t): t is Tab => !!t);
   }
 
   isVisible(id: string): boolean {
     return this.groups.some((g) => g.activeId === id);
   }
 
-  open(spec: TabSpec, { activate = true, group }: OpenOptions = {}): Tab {
+  isPreview(id: string): boolean {
+    return this.groups.some((g) => g.previewId === id);
+  }
+
+  /** Keeps a preview tab open (it becomes a normal tab). */
+  pin(id: string) {
+    for (const g of this.groups) if (g.previewId === id) g.previewId = null;
+  }
+
+  open(spec: TabSpec, { activate = true, group, preview = false }: OpenOptions = {}): Tab {
     let tab = SINGLETON.has(spec.kind)
       ? this.list.find((t) => t.kind === spec.kind && t.hostId === spec.hostId)
       : undefined;
     if (tab) {
-      if (group !== undefined) this.moveToGroup(tab.id, this.#resolveGroup(group));
+      if (!preview) this.pin(tab.id);
+      if (group !== undefined) this.moveToGroup(tab.id, group);
     } else {
       tab = { ...spec, id: newId(spec.kind) } as Tab;
-      const gi = group === undefined ? this.focused : this.#resolveGroup(group);
+      const g = this.group(group === undefined ? this.focusedGroup : this.#resolve(group)) ?? this.groups[0];
+      const replaced = preview && g.previewId ? g.previewId : null;
       this.list = [...this.list, tab];
-      const g = this.groups[gi];
-      // Insert after the group's active tab, like browsers do.
-      const at = g.activeId ? g.tabIds.indexOf(g.activeId) : -1;
-      g.tabIds.splice(at === -1 ? g.tabIds.length : at + 1, 0, tab.id);
-      if (!activate && !g.activeId) g.activeId = tab.id;
+      // Take the replaced preview's place, else go after the active tab like browsers do.
+      const anchor = replaced ?? g.activeId;
+      const at = anchor ? g.tabIds.indexOf(anchor) : -1;
+      g.tabIds.splice(at === -1 ? g.tabIds.length : replaced ? at : at + 1, 0, tab.id);
+      if (preview) g.previewId = tab.id;
+      if (!g.activeId || (replaced && g.activeId === replaced)) g.activeId = tab.id;
+      if (replaced) this.close(replaced);
     }
     if (activate) this.activate(tab.id);
     return tab;
   }
 
-  /** Index for "other"/explicit groups, creating the second group if needed. */
-  #resolveGroup(group: number | "other"): number {
-    if (group === "other") {
-      if (this.groups.length === 1) {
-        this.groups.push({ id: newId("group"), tabIds: [], activeId: null });
-        return 1;
-      }
-      return this.focused === 0 ? 1 : 0;
-    }
-    if (group >= this.groups.length) {
-      this.groups.push({ id: newId("group"), tabIds: [], activeId: null });
-      return this.groups.length - 1;
-    }
-    return Math.max(0, group);
+  /** Group id for a placement, creating a group if needed. */
+  #resolve(placement: Placement): string {
+    if (placement === "beside") return this.#beside(this.focusedGroup);
+    if (typeof placement === "string") return this.group(placement) ? placement : this.focusedGroup;
+    return this.#splitGroup(placement.of ?? this.focusedGroup, placement.split);
   }
 
-  openHost(hostId: HostId) {
-    return this.open({ kind: "host", hostId });
+  /** A group next to `from` (right, left, below, above), or a new one on its right. */
+  #beside(from: string): string {
+    for (const dir of ["right", "left", "down", "up"] as const) {
+      const n = neighbor(this.layout, from, dir);
+      if (n) return n;
+    }
+    return this.#splitGroup(from, "right");
+  }
+
+  /** Splits group `of`, putting a new empty group on the `dir` side. */
+  #splitGroup(of: string, dir: Direction): string {
+    const g = emptyGroup();
+    const target = this.group(of) ? of : this.focusedGroup;
+    this.groups.push(g);
+    this.layout = splitLeaf(this.layout, target, dirAxis(dir), { type: "group", id: g.id }, dir === "left" || dir === "up");
+    return g.id;
+  }
+
+  openHost(hostId: HostId, opts: OpenOptions = {}) {
+    return this.open({ kind: "host", hostId }, { preview: true, ...opts });
   }
 
   /** Forwards of one host, or all hosts (null). */
   openForwards(hostId: HostId | null, opts: OpenOptions = {}) {
-    return this.open({ kind: "forwards", hostId }, opts);
+    return this.open({ kind: "forwards", hostId }, { preview: true, ...opts });
   }
 
   isDormant(id: string): boolean {
@@ -175,51 +246,64 @@ class Tabs {
   }
 
   /** Replaces the whole layout (session restore). Ids must be consistent. */
-  replaceAll(state: { list: Tab[]; groups: Group[]; focused: number; splitRatio: number; dormant: string[] }) {
+  replaceAll(state: { list: Tab[]; groups: Group[]; layout: GroupNode; focusedGroup: string; dormant: string[] }) {
     this.list = state.list;
-    this.groups = state.groups.length ? state.groups : [{ id: newId("group"), tabIds: [], activeId: null }];
-    this.focused = Math.min(Math.max(0, state.focused), this.groups.length - 1);
-    this.splitRatio = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, state.splitRatio));
+    this.groups = state.groups;
+    this.layout = state.layout;
+    this.focusedGroup = state.groups.some((g) => g.id === state.focusedGroup) ? state.focusedGroup : state.groups[0].id;
     this.dormant = Object.fromEntries(state.dormant.map((id) => [id, true as const]));
   }
 
   activate(id: string) {
-    const gi = this.groupOf(id);
-    if (gi === -1) return;
-    this.groups[gi].activeId = id;
-    this.focused = gi;
+    const g = this.groups.find((g) => g.tabIds.includes(id));
+    if (!g) return;
+    g.activeId = id;
+    this.focusedGroup = g.id;
   }
 
-  focusGroup(index: number) {
-    if (index >= 0 && index < this.groups.length) this.focused = index;
+  focusGroup(id: string | undefined) {
+    if (id && this.group(id)) this.focusedGroup = id;
   }
 
-  /** Focus the other side of the split. Returns false if not split. */
-  focusOther(): boolean {
-    if (!this.isSplit) return false;
-    this.focused = this.focused === 0 ? 1 : 0;
+  /** Focuses the group next to the focused one in `dir`. Returns false if there is none. */
+  focusDir(dir: Direction): boolean {
+    const n = neighbor(this.layout, this.focusedGroup, dir);
+    if (n) this.focusedGroup = n;
+    return !!n;
+  }
+
+  /** Focuses the next (or previous) group in layout order. Returns false if not split. */
+  cycleGroup(delta: number): boolean {
+    const n = this.order.length;
+    if (n < 2) return false;
+    const i = this.order.indexOf(this.focusedGroup);
+    this.focusedGroup = this.order[(((i + delta) % n) + n) % n];
     return true;
   }
 
   close(id: string) {
-    const gi = this.groupOf(id);
-    if (gi === -1) return;
-    const g = this.groups[gi];
+    const g = this.groups.find((g) => g.tabIds.includes(id));
+    if (!g) return;
     const i = g.tabIds.indexOf(id);
     g.tabIds.splice(i, 1);
     if (g.activeId === id) g.activeId = g.tabIds[i] ?? g.tabIds[i - 1] ?? null;
+    if (g.previewId === id) g.previewId = null;
     this.list = this.list.filter((t) => t.id !== id);
     this.wake(id);
-    this.#collapseEmpty();
+    this.#collapse(g.id);
   }
 
-  /** Drops an empty group so the split collapses. */
-  #collapseEmpty() {
-    if (this.groups.length < 2) return;
-    const empty = this.groups.findIndex((g) => g.tabIds.length === 0);
-    if (empty === -1) return;
-    this.groups.splice(empty, 1);
-    this.focused = 0;
+  /** Drops group `id` if it is empty (and not the only one); a neighbour takes its space. */
+  #collapse(id: string) {
+    const g = this.group(id);
+    if (this.groups.length < 2 || !g || g.tabIds.length) return;
+    if (this.focusedGroup === id) {
+      const order = this.order;
+      const i = order.indexOf(id);
+      this.focusedGroup = order[i + 1] ?? order[i - 1];
+    }
+    this.layout = removeLeaf(this.layout, id) ?? { type: "group", id: this.focusedGroup };
+    this.groups = this.groups.filter((x) => x.id !== id);
   }
 
   closeActive() {
@@ -227,9 +311,9 @@ class Tabs {
   }
 
   closeOthers(id: string) {
-    const gi = this.groupOf(id);
-    if (gi === -1) return;
-    for (const other of this.groups[gi].tabIds.filter((t) => t !== id)) this.close(other);
+    const g = this.groups.find((g) => g.tabIds.includes(id));
+    if (!g) return;
+    for (const other of g.tabIds.filter((t) => t !== id)) this.close(other);
   }
 
   closeForHost(hostId: HostId) {
@@ -251,7 +335,7 @@ class Tabs {
 
   /** Cycles through the focused group's tabs. */
   cycle(delta: number) {
-    const g = this.groups[this.focused];
+    const g = this.group(this.focusedGroup);
     if (!g || g.tabIds.length < 2) return;
     const i = g.activeId ? g.tabIds.indexOf(g.activeId) : 0;
     const n = g.tabIds.length;
@@ -259,47 +343,65 @@ class Tabs {
   }
 
   activateIndex(index: number) {
-    const g = this.groups[this.focused];
+    const g = this.group(this.focusedGroup);
     const id = g?.tabIds[index === -1 ? g.tabIds.length - 1 : index];
     if (id) this.activate(id);
   }
 
-  /** Moves a tab to `toIndex` within `group` (defaults to its own group). */
-  move(id: string, toIndex: number, group?: number) {
-    const from = this.groupOf(id);
-    if (from === -1) return;
-    const to = group === undefined ? from : this.#resolveGroup(group);
-    const src = this.groups[from];
+  /** Moves a tab to `toIndex` within `group` (defaults to its own group). Keeps a preview open. */
+  move(id: string, toIndex: number, group?: Placement) {
+    const src = this.groups.find((g) => g.tabIds.includes(id));
+    if (!src) return;
+    const to = group === undefined ? src.id : this.#resolve(group);
+    const dst = this.group(to);
+    if (!dst) return;
+    this.pin(id);
     const i = src.tabIds.indexOf(id);
     src.tabIds.splice(i, 1);
     if (src.activeId === id) src.activeId = src.tabIds[i] ?? src.tabIds[i - 1] ?? null;
-    const dst = this.groups[to];
-    const at = from === to && i < toIndex ? toIndex - 1 : toIndex;
+    const at = src === dst && i < toIndex ? toIndex - 1 : toIndex;
     dst.tabIds.splice(Math.max(0, Math.min(at, dst.tabIds.length)), 0, id);
     dst.activeId = id;
-    this.focused = to;
-    const dstId = dst.id;
-    this.#collapseEmpty();
-    this.focused = Math.max(0, this.groups.findIndex((g) => g.id === dstId));
+    this.focusedGroup = dst.id;
+    this.#collapse(src.id);
   }
 
-  moveToGroup(id: string, group: number | "other") {
+  /** Moves a tab to the end of another group (no-op if it is already there). */
+  moveToGroup(id: string, group: Placement) {
     const from = this.groupOf(id);
-    if (from === -1) return;
-    // Moving the only tab of the only group into a new group is a no-op.
-    if (this.groups.length === 1 && this.groups[0].tabIds.length === 1 && group !== 0) return;
-    const to = group === "other" ? (from === 0 ? 1 : 0) : group;
+    if (!from) return;
+    // Splitting a group off its only tab would just move the tab into itself.
+    const base = group === "beside" ? this.focusedGroup : typeof group === "object" ? (group.of ?? this.focusedGroup) : null;
+    // ("beside" only creates a group when there is no other one.)
+    const creates = typeof group === "object" || (group === "beside" && !this.isSplit);
+    if (base === from && creates && !this.canSplit(id)) return;
+    if (group === from) return;
+    const to = this.#resolve(group);
     if (to === from) return;
-    this.move(id, this.groups[to]?.tabIds.length ?? 0, to);
+    this.move(id, this.group(to)?.tabIds.length ?? 0, to);
   }
 
-  /** Can this tab be moved to the other side (needs a tab left behind)? */
-  canMoveToOther(): boolean {
-    return this.isSplit || this.list.length > 1;
+  /** Can this tab be split off into a group of its own (needs a tab left behind)? */
+  canSplit(id: string): boolean {
+    const g = this.groups.find((g) => g.tabIds.includes(id));
+    return !!g && g.tabIds.length > 1;
   }
 
-  setSplitRatio(r: number) {
-    this.splitRatio = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, r));
+  /** Neighbouring groups of the group holding `id`, by direction. */
+  neighbors(id: string): Partial<Record<Direction, string>> {
+    const from = this.groupOf(id);
+    const out: Partial<Record<Direction, string>> = {};
+    if (!from) return out;
+    for (const dir of ["left", "right", "up", "down"] as const) {
+      const n = neighbor(this.layout, from, dir);
+      if (n) out[dir] = n;
+    }
+    return out;
+  }
+
+  setRatio(splitId: string, ratio: number) {
+    const split = findSplit(this.layout, splitId);
+    if (split) split.ratio = clampRatio(ratio);
   }
 
   /** Updates per-kind params (e.g. a files tab's path) in place. */

@@ -25,7 +25,7 @@ import type { FileDrag } from "../stores/dnd.svelte";
 import { edits } from "../stores/edits.svelte";
 import { filePrefs, files, type FileBrowser } from "../stores/files.svelte";
 import { hosts } from "../stores/hosts.svelte";
-import { tabs, type FilesTab } from "../stores/tabs.svelte";
+import { tabs, type FilesTab, type Placement } from "../stores/tabs.svelte";
 import { toasts } from "../stores/toasts.svelte";
 import { transfers } from "../stores/transfers.svelte";
 import { ui, type MenuItem } from "../stores/ui.svelte";
@@ -64,7 +64,7 @@ export interface OpenFilesOptions {
   path?: string | null;
   /** Focus an existing files tab for this machine instead of opening one. */
   reuse?: boolean;
-  group?: number | "other";
+  group?: Placement;
 }
 
 /** Opens a files tab, connecting first for remote hosts. */
@@ -73,23 +73,21 @@ export function openFiles(hostId: HostId | null, { path = null, reuse = false, g
     const phase = connections.get(hostId).phase;
     if (phase === "idle" || phase === "error") void connections.connect(hostId);
   }
-  // "other" is relative to the focused group.
-  const target = group === "other" ? (tabs.focused === 0 ? 1 : 0) : group;
   if (reuse) {
     const existing =
       tabs.list.find((t) => t.kind === "files" && t.hostId === hostId && tabs.isVisible(t.id)) ??
       tabs.list.find((t) => t.kind === "files" && t.hostId === hostId);
     if (existing) {
-      if (target !== undefined && tabs.groupOf(existing.id) !== target) tabs.moveToGroup(existing.id, target);
+      if (group !== undefined) tabs.moveToGroup(existing.id, group);
       tabs.activate(existing.id);
       return existing;
     }
   }
-  return tabs.open({ kind: "files", hostId, path }, { group: target });
+  return tabs.open({ kind: "files", hostId, path }, { group });
 }
 
-/** Opens a copy of a files tab at the same location, optionally in the other group. */
-export function duplicateFilesTab(tab: FilesTab, group?: number | "other") {
+/** Opens a copy of a files tab at the same location, optionally in another group. */
+export function duplicateFilesTab(tab: FilesTab, group?: Placement) {
   return tabs.open({ kind: "files", hostId: tab.hostId, path: tab.path }, { group });
 }
 
@@ -249,9 +247,8 @@ export async function paste(b: FileBrowser) {
   await transfer(clip.hostId, clip.entries, { hostId: b.hostId, path: b.path });
 }
 
-export async function copyToOther(b: FileBrowser, entries: FileEntry[]) {
-  const other = files.otherPane(b.tabId);
-  if (!other?.path) return;
+export async function copyToOther(b: FileBrowser, entries: FileEntry[], other: FileBrowser) {
+  if (!other.path) return;
   await transfer(b.hostId, entries, { hostId: other.hostId, path: other.path });
 }
 
@@ -387,7 +384,7 @@ export function setPreview(b: FileBrowser, open: boolean) {
 
 export function entryMenu(b: FileBrowser, entries: FileEntry[]): MenuItem[] {
   const one = entries.length === 1 ? entries[0] : null;
-  const other = files.otherPane(b.tabId);
+  const others = files.otherPanes(b.tabId).filter((o) => o.path);
   const remote = b.hostId !== null;
   const items: MenuItem[] = [];
   if (one) {
@@ -407,11 +404,11 @@ export function entryMenu(b: FileBrowser, entries: FileEntry[]): MenuItem[] {
     if (external) items.push(external);
     items.push({ separator: true });
   }
-  if (other?.path) {
+  for (const other of others.slice(0, 3)) {
     items.push({
-      label: `Copy to ${machineName(other.hostId)}: ${basename(other.path)}`,
+      label: `Copy to ${machineName(other.hostId)}: ${basename(other.path!)}`,
       icon: ArrowLeftRight,
-      onSelect: () => void copyToOther(b, entries),
+      onSelect: () => void copyToOther(b, entries, other),
     });
   }
   if (remote) items.push({ label: "Download to…", icon: Download, onSelect: () => void downloadTo(b, entries) });

@@ -7,8 +7,8 @@
 // testing. Drop targets are found with `elementFromPoint` + data attributes:
 //   [data-pane="<tabId>"]        a files pane (drop = its current directory)
 //   [data-dir-path="<path>"]     a folder row inside a pane (drop = that folder)
-//   [data-strip-group="<i>"]     a tab strip, [data-tab-id] tabs inside it
-//   [data-panels]                the panel area (right edge = split)
+//   [data-strip-group="<id>"]    a tab strip, [data-tab-id] tabs inside it
+//   [data-group-panel="<id>"]    a group's panel (edges = split it, middle = move there)
 //
 // Drops from the OS arrive through Tauri's webview drag-drop events (local
 // paths + physical position); in a plain browser only HTML5 file drags exist,
@@ -30,7 +30,8 @@ import { isMac } from "../util/platform";
 import { sentence, toCommandError } from "../util/errors";
 import { DragOut, dragIcon } from "./dragout.svelte";
 import { files } from "./files.svelte";
-import { tabs } from "./tabs.svelte";
+import type { Direction } from "../util/splitTree";
+import { GROUP_MIN_H, GROUP_MIN_W, tabs } from "./tabs.svelte";
 import { toasts } from "./toasts.svelte";
 import { transfers } from "./transfers.svelte";
 
@@ -63,9 +64,9 @@ export interface NativeDrag {
 }
 
 export type TabDropTarget =
-  | { kind: "strip"; group: number; index: number; x: number }
-  | { kind: "group"; group: number }
-  | { kind: "split" };
+  | { kind: "strip"; group: string; index: number; x: number }
+  /** Into a group (`edge` null), or a new group split off it on that side; `rect` is the highlighted area. */
+  | { kind: "group"; group: string; edge: Direction | null; rect: { left: number; top: number; width: number; height: number } };
 
 export interface TabDrag {
   id: string;
@@ -233,7 +234,7 @@ class Dnd {
     window.addEventListener("keyup", key, true);
   }
 
-  /** Arms a tab drag (reorder, move to the other group, or split). */
+  /** Arms a tab drag (reorder, move to another group, or split). */
   armTabDrag(e: PointerEvent, id: string) {
     const sx = e.clientX;
     const sy = e.clientY;
@@ -268,8 +269,8 @@ class Dnd {
       const target = t.target;
       if (!target) return;
       if (target.kind === "strip") tabs.move(id, target.index, target.group);
-      else if (target.kind === "group") tabs.moveToGroup(id, target.group);
-      else tabs.moveToGroup(id, "other");
+      else if (target.edge) tabs.moveToGroup(id, { split: target.edge, of: target.group });
+      else tabs.moveToGroup(id, target.group);
     };
     const stop = () => {
       window.removeEventListener("pointermove", move);
@@ -308,11 +309,14 @@ class Dnd {
   }
 }
 
+/** Share of a group's width/height near each edge that splits it. */
+const EDGE = 1 / 3;
+
 function tabTarget(id: string, x: number, y: number): TabDropTarget | null {
   const el = document.elementFromPoint(x, y);
   const strip = el?.closest<HTMLElement>("[data-strip-group]");
   if (strip) {
-    const group = Number(strip.dataset.stripGroup);
+    const group = strip.dataset.stripGroup!;
     const tabEls = [...strip.querySelectorAll<HTMLElement>("[data-tab-wrap]")];
     let index = tabEls.length;
     let lineX = tabEls.length ? tabEls[tabEls.length - 1].getBoundingClientRect().right : strip.getBoundingClientRect().left + 8;
@@ -326,16 +330,31 @@ function tabTarget(id: string, x: number, y: number): TabDropTarget | null {
     }
     return { kind: "strip", group, index, x: lineX };
   }
-  const panels = el?.closest<HTMLElement>("[data-panels]");
-  if (!panels) return null;
-  const r = panels.getBoundingClientRect();
-  const from = tabs.groupOf(id);
-  if (!tabs.isSplit) {
-    if (tabs.list.length < 2) return null;
-    return x > r.left + r.width * 0.6 ? { kind: "split" } : null;
-  }
-  const group = x < r.left + r.width * tabs.splitRatio ? 0 : 1;
-  return group === from ? null : { kind: "group", group };
+  const panel = el?.closest<HTMLElement>("[data-group-panel]");
+  const group = panel?.dataset.groupPanel;
+  if (!panel || !group) return null;
+  const r = panel.getBoundingClientRect();
+  const own = tabs.groupOf(id) === group;
+  // The nearest edge, if close enough and there is room for two groups.
+  const nx = (x - r.left) / r.width;
+  const ny = (y - r.top) / r.height;
+  const near: [Direction, number][] = [
+    ["left", nx],
+    ["right", 1 - nx],
+    ["up", ny],
+    ["down", 1 - ny],
+  ];
+  const [edge, dist] = near.reduce((a, b) => (b[1] < a[1] ? b : a));
+  const room = edge === "left" || edge === "right" ? r.width / 2 >= GROUP_MIN_W : r.height / 2 >= GROUP_MIN_H;
+  // A tab alone in its group can't split it.
+  const side = dist < EDGE && room && (!own || tabs.canSplit(id)) ? edge : null;
+  if (!side && own) return null;
+  const rect = { left: r.left, top: r.top, width: r.width, height: r.height };
+  if (side === "left" || side === "right") rect.width /= 2;
+  if (side === "right") rect.left += rect.width;
+  if (side === "up" || side === "down") rect.height /= 2;
+  if (side === "down") rect.top += rect.height;
+  return { kind: "group", group, edge: side, rect };
 }
 
 export const dnd = new Dnd();

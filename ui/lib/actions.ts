@@ -26,12 +26,14 @@ import type { Host, HostDraft } from "./types";
 import { isEditable, sshCommand, tildify } from "./util/format";
 import { writeClipboard } from "./util/clipboard";
 
+/** Shows a host's overview (as a preview tab, see stores/tabs.svelte.ts). */
 export function openHost(host: Host) {
   tabs.openHost(host.id);
 }
 
+/** Connects; with `open`, the host's overview is shown and kept open. */
 export function connectHost(host: Host, { open = true } = {}) {
-  if (open) tabs.openHost(host.id);
+  if (open) tabs.openHost(host.id, { preview: false });
   void connections.connect(host.id);
 }
 
@@ -62,7 +64,7 @@ export function editHost(host: Host) {
 
 /** Asks which user to log in as, then connects (Tailscale devices). */
 export function connectHostAs(host: Host) {
-  tabs.openHost(host.id);
+  tabs.openHost(host.id, { preview: false });
   ui.connectAs = { hostId: host.id, reason: "choose" };
 }
 

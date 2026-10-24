@@ -244,7 +244,7 @@
     {#each paneList as leaf (leaf.id)}
       {@const session = terminals.get(leaf.id)}
       {@const zoomed = tab.zoomedPane === leaf.id}
-      {@const rect = zoomed ? { x: 0, y: 0, w: 1, h: 1 } : (layout.panes.get(leaf.id) ?? { x: 0, y: 0, w: 1, h: 1 })}
+      {@const rect = zoomed ? { x: 0, y: 0, w: 1, h: 1 } : (layout.rects.get(leaf.id) ?? { x: 0, y: 0, w: 1, h: 1 })}
       {#if session}
         <TerminalPane
           {tab}

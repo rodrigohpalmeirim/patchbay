@@ -17,11 +17,12 @@ import X from "@lucide/svelte/icons/x";
 import { openFiles } from "../files/ops";
 import { connections } from "../stores/connections.svelte";
 import { hosts } from "../stores/hosts.svelte";
-import { tabs, type TerminalTab } from "../stores/tabs.svelte";
+import { tabs, type Placement, type TerminalTab } from "../stores/tabs.svelte";
 import { terminals } from "../stores/terminals.svelte";
 import { ui, type MenuItem } from "../stores/ui.svelte";
 import type { HostId } from "../types";
 import { tildify } from "../util/format";
+import { focusTabPanel } from "../tabFocus";
 import { keyLabel, type TermAction } from "./keys";
 import { findLeaf, leaves, neighbor, newPane, removePane, splitPane, type Direction, type SplitDir } from "./layout";
 
@@ -35,7 +36,7 @@ export function terminalUnavailable(hostId: HostId | null): string | null {
 export interface OpenTerminalOptions {
   /** Start directory (null = home). */
   cwd?: string | null;
-  group?: number | "other";
+  group?: Placement;
 }
 
 /** Opens a terminal tab, connecting first for remote hosts. */
@@ -44,12 +45,8 @@ export function openTerminal(hostId: HostId | null, { cwd = null, group }: OpenT
     const phase = connections.get(hostId).phase;
     if (phase === "idle" || phase === "error") void connections.connect(hostId);
   }
-  const target = group === "other" ? (tabs.focused === 0 ? 1 : 0) : group;
   const pane = newPane(cwd);
-  const tab = tabs.open(
-    { kind: "terminal", hostId, cwd, layout: pane, focusedPane: pane.id, zoomedPane: null },
-    { group: target },
-  ) as TerminalTab;
+  const tab = tabs.open({ kind: "terminal", hostId, cwd, layout: pane, focusedPane: pane.id, zoomedPane: null }, { group }) as TerminalTab;
   terminals.requestFocus(tab.id);
   return tab;
 }
@@ -64,7 +61,7 @@ export function newTerminalForActive() {
   openTerminal(hostId);
 }
 
-export function duplicateTerminalTab(tab: TerminalTab, group?: number | "other") {
+export function duplicateTerminalTab(tab: TerminalTab, group?: Placement) {
   const cwd = terminals.get(tab.focusedPane)?.cwd ?? tab.cwd;
   return openTerminal(tab.hostId, { cwd, group });
 }
@@ -115,10 +112,11 @@ export function closePane(tab: TerminalTab, paneId: string) {
   terminals.requestFocus(live.id);
 }
 
+/** Focuses the pane in `dir`, or past the tab's edge, the tab group there. */
 export function moveFocus(tab: TerminalTab, dir: Direction) {
-  if (tab.zoomedPane) return;
-  const id = neighbor(tab.layout, tab.focusedPane, dir);
+  const id = tab.zoomedPane ? null : neighbor(tab.layout, tab.focusedPane, dir);
   if (id) focusPane(tab, id);
+  else if (tabs.groupOf(tab.id) === tabs.focusedGroup && tabs.focusDir(dir)) focusTabPanel(tabs.activeId);
 }
 
 export function toggleZoom(tab: TerminalTab, paneId = tab.focusedPane) {

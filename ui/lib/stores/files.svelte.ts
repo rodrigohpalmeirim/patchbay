@@ -481,13 +481,13 @@ class Files {
     }
   }
 
-  /** The files pane showing in the other split group, if any. */
-  otherPane(tabId: string): FileBrowser | undefined {
-    if (!tabs.isSplit) return undefined;
-    const gi = tabs.groupOf(tabId);
-    const other = tabs.groups[gi === 0 ? 1 : 0];
-    const t = other?.activeId ? tabs.get(other.activeId) : undefined;
-    return t?.kind === "files" ? this.#browsers.get(t.id) : undefined;
+  /** Files panes showing in the other tab groups (left to right, top to bottom). */
+  otherPanes(tabId: string): FileBrowser[] {
+    const own = tabs.groupOf(tabId);
+    return tabs.order
+      .filter((id) => id !== own)
+      .map((id) => this.#browsers.get(tabs.group(id)?.activeId ?? ""))
+      .filter((b): b is FileBrowser => !!b && b.tabId !== tabId);
   }
 
   /** Lost connection: keep listings, mark stale. */

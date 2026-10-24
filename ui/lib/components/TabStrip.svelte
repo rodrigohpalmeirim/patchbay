@@ -1,9 +1,14 @@
 <script lang="ts">
+  import ArrowDown from "@lucide/svelte/icons/arrow-down";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import ArrowRight from "@lucide/svelte/icons/arrow-right";
+  import ArrowUp from "@lucide/svelte/icons/arrow-up";
   import Columns2 from "@lucide/svelte/icons/columns-2";
   import Copy from "@lucide/svelte/icons/copy";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import Laptop from "@lucide/svelte/icons/laptop";
   import Plus from "@lucide/svelte/icons/plus";
+  import Rows2 from "@lucide/svelte/icons/rows-2";
   import SquareTerminal from "@lucide/svelte/icons/square-terminal";
   import X from "@lucide/svelte/icons/x";
   import { hostMenuItems } from "../actions";
@@ -14,17 +19,25 @@
   import { connections } from "../stores/connections.svelte";
   import { dnd } from "../stores/dnd.svelte";
   import { hosts } from "../stores/hosts.svelte";
-  import { tabs, type Tab } from "../stores/tabs.svelte";
+  import { tabs, type Placement, type Tab } from "../stores/tabs.svelte";
   import { ui, type MenuItem } from "../stores/ui.svelte";
   import { modKey } from "../util/platform";
   import { tabDef } from "../views/tabKinds";
   import StatusDot from "./StatusDot.svelte";
 
-  let { group, focused = false }: { group: number; focused?: boolean } = $props();
+  let { group, focused = false }: { group: string; focused?: boolean } = $props();
 
   let strip = $state<HTMLElement>();
   const list = $derived(tabs.tabsIn(group));
-  const activeId = $derived(tabs.groups[group]?.activeId ?? null);
+  const activeId = $derived(tabs.group(group)?.activeId ?? null);
+  const previewId = $derived(tabs.group(group)?.previewId ?? null);
+
+  const MOVES = [
+    ["left", "Move to the left group", ArrowLeft],
+    ["right", "Move to the right group", ArrowRight],
+    ["up", "Move to the group above", ArrowUp],
+    ["down", "Move to the group below", ArrowDown],
+  ] as const;
 
   function focusTab(id: string) {
     tabs.activate(id);
@@ -60,25 +73,25 @@
       },
       { separator: true },
     ];
-    const canMove = tabs.isSplit || list.length > 1;
-    if (canMove) {
-      items.push({
-        label: tabs.isSplit ? "Move to other side" : "Open in split view",
-        icon: Columns2,
-        hint: `${modKey}+\\`,
-        onSelect: () => tabs.moveToGroup(tab.id, "other"),
-      });
+    if (tabs.canSplit(tab.id)) {
+      items.push(
+        { label: "Split right", icon: Columns2, hint: `${modKey}+\\`, onSelect: () => tabs.moveToGroup(tab.id, { split: "right" }) },
+        { label: "Split down", icon: Rows2, onSelect: () => tabs.moveToGroup(tab.id, { split: "down" }) },
+      );
     }
-    if (tab.kind === "terminal") {
-      items.push({ label: "Duplicate tab", icon: Copy, onSelect: () => duplicateTerminalTab(tab, group) });
-      if (!canMove) {
-        items.push({ label: "Duplicate in split view", icon: Columns2, onSelect: () => duplicateTerminalTab(tab, group === 0 ? 1 : 0) });
-      }
+    const near = tabs.neighbors(tab.id);
+    for (const [dir, label, icon] of MOVES) {
+      const to = near[dir];
+      if (to) items.push({ label, icon, onSelect: () => tabs.moveToGroup(tab.id, to) });
     }
-    if (tab.kind === "files") {
-      items.push({ label: "Duplicate tab", icon: Copy, onSelect: () => duplicateFilesTab(tab, group) });
-      if (!canMove) {
-        items.push({ label: "Duplicate in split view", icon: Columns2, onSelect: () => duplicateFilesTab(tab, group === 0 ? 1 : 0) });
+    if (tab.kind === "terminal" || tab.kind === "files") {
+      const duplicate = (to?: Placement) => (tab.kind === "terminal" ? duplicateTerminalTab(tab, to) : duplicateFilesTab(tab, to));
+      items.push({ label: "Duplicate tab", icon: Copy, onSelect: () => duplicate(group) });
+      if (!tabs.canSplit(tab.id)) {
+        items.push(
+          { label: "Duplicate to the right", icon: Columns2, onSelect: () => duplicate({ split: "right", of: group }) },
+          { label: "Duplicate below", icon: Rows2, onSelect: () => duplicate({ split: "down", of: group }) },
+        );
       }
     }
     if (host) items.push({ separator: true }, ...hostMenuItems(host, { includeOpen: tab.kind !== "host" }));
@@ -110,7 +123,7 @@
         {
           label: `Terminal on ${host.name}`,
           icon: SquareTerminal,
-          hint: noShell ? "SFTP only" : group === tabs.focused ? NEW_TERMINAL_KEY : undefined,
+          hint: noShell ? "SFTP only" : group === tabs.focusedGroup ? NEW_TERMINAL_KEY : undefined,
           disabled: !!noShell,
           onSelect: () => openTerminal(host.id, { group }),
         },
@@ -119,7 +132,7 @@
       );
     }
     items.push(
-      { label: "Local terminal", icon: SquareTerminal, hint: !host && group === tabs.focused ? NEW_TERMINAL_KEY : undefined, onSelect: () => openTerminal(null, { group }) },
+      { label: "Local terminal", icon: SquareTerminal, hint: !host && group === tabs.focusedGroup ? NEW_TERMINAL_KEY : undefined, onSelect: () => openTerminal(null, { group }) },
       { label: "Local files", icon: Laptop, onSelect: () => openFiles(null, { group }) },
     );
     ui.openMenu("New tab", items, e.currentTarget as HTMLElement);
@@ -133,15 +146,16 @@
   });
 </script>
 
-<div class="strip" class:focused bind:this={strip} role="tablist" aria-label={tabs.isSplit ? (group === 0 ? "Left tabs" : "Right tabs") : "Open tabs"} data-strip-group={group}>
+<div class="strip" class:focused bind:this={strip} role="tablist" aria-label={tabs.isSplit ? "Tab group" : "Open tabs"} data-strip-group={group}>
   {#each list as tab (tab.id)}
     {@const host = hosts.get(tab.hostId)}
     {@const def = tabDef(tab)}
     {@const Icon = def.icon(tab)}
     {@const active = tab.id === activeId}
+    {@const preview = tab.id === previewId}
     {@const title = def.title(tab, host)}
     {@const subtitle = def.subtitle?.(tab, host)}
-    <div class="tab" class:active class:dragging={dnd.tab?.id === tab.id} data-tab-wrap>
+    <div class="tab" class:active class:preview class:dragging={dnd.tab?.id === tab.id} data-tab-wrap>
       <button
         type="button"
         role="tab"
@@ -151,8 +165,9 @@
         aria-selected={active}
         aria-controls="panel-{tab.id}"
         tabindex={active ? 0 : -1}
-        title={def.tooltip?.(tab, host) ?? title}
+        title={(def.tooltip?.(tab, host) ?? title) + (preview ? " (preview: double-click to keep it open)" : "")}
         onclick={() => onclick(tab)}
+        ondblclick={() => tabs.pin(tab.id)}
         onpointerdown={(e) => onpointerdown(e, tab)}
         onauxclick={(e) => e.button === 1 && tabs.close(tab.id)}
         onkeydown={(e) => onkeydown(e, tab)}
@@ -237,16 +252,25 @@
   .tab.dragging {
     opacity: 0.5;
   }
-  /* In split view the focused group's active tab carries an accent cap. */
+  /* In split view the focused group's active tab carries an accent cap: a
+     top border over the tab's own, so it follows the rounded corners. */
   .focused .tab.active::before {
     content: "";
     position: absolute;
     left: -1px;
     right: -1px;
     top: -1px;
-    height: 2px;
+    height: var(--radius-sm);
+    border-top: 2px solid var(--accent);
     border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-    background: var(--accent);
+    pointer-events: none;
+  }
+  /* Preview tabs (replaced by the next one opened) are set in italics. */
+  .tab.preview .title {
+    font-style: italic;
+    /* Room for the slanted last letter inside the clip, without moving what follows. */
+    padding-right: 0.15em;
+    margin-right: -0.15em;
   }
   /* Covers the strip's bottom border under the active tab. */
   .tab.active::after {

@@ -198,10 +198,10 @@
       [
         { label: "Open files", icon: FolderOpen, onSelect: () => openFiles(null, { reuse: true }) },
         { label: "New files tab", icon: FolderOpen, onSelect: () => openFiles(null) },
-        { label: "Open in split view", icon: Columns2, onSelect: () => openFiles(null, { reuse: true, group: "other" }) },
+        { label: "Open in split view", icon: Columns2, onSelect: () => openFiles(null, { reuse: true, group: "beside" }) },
         { separator: true },
         { label: "Open local terminal", icon: SquareTerminal, onSelect: () => openTerminal(null) },
-        { label: "Local terminal in split view", icon: Columns2, onSelect: () => openTerminal(null, { group: "other" }) },
+        { label: "Local terminal in split view", icon: Columns2, onSelect: () => openTerminal(null, { group: "beside" }) },
       ],
       e.clientX > 0 ? { x: e.clientX, y: e.clientY } : (e.currentTarget as HTMLElement),
     );

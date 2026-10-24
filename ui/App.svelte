@@ -31,6 +31,7 @@
   import { hasMod, isEditable, isMac } from "./lib/util/platform";
   import { inTerminal, isNewTerminalKey } from "./lib/terminal/keys";
   import { newTerminalForActive } from "./lib/terminal/ops";
+  import { focusTabPanel } from "./lib/tabFocus";
   import Welcome from "./lib/views/Welcome.svelte";
 
   onMount(() => {
@@ -45,14 +46,6 @@
       stop?.();
     };
   });
-
-  function focusPanel(id: string | null) {
-    if (!id) return;
-    requestAnimationFrame(() => {
-      const panel = document.getElementById(`panel-${id}`);
-      (panel?.querySelector<HTMLElement>("[data-autofocus-panel]") ?? panel)?.focus();
-    });
-  }
 
   function onkeydown(e: KeyboardEvent) {
     if (e.defaultPrevented) return;
@@ -95,15 +88,18 @@
       e.preventDefault();
       tabs.cycle(e.key === "PageDown" ? 1 : -1);
     } else if (e.key === "F6" && tabs.isSplit) {
-      // Jump to the other side of the split.
+      // Jump to the next (Shift: previous) tab group.
       e.preventDefault();
-      tabs.focusOther();
-      focusPanel(tabs.activeId);
+      tabs.cycleGroup(e.shiftKey ? -1 : 1);
+      focusTabPanel(tabs.activeId);
     } else if (mod && e.key === "\\" && tabs.activeId) {
+      // Split the tab off to the right; a tab alone in its group joins a neighbouring one.
       e.preventDefault();
       const id = tabs.activeId;
-      tabs.moveToGroup(id, "other");
-      focusPanel(id);
+      const n = tabs.neighbors(id);
+      const to = tabs.canSplit(id) ? ({ split: "right" } as const) : (n.left ?? n.up ?? n.right ?? n.down);
+      if (to) tabs.moveToGroup(id, to);
+      focusTabPanel(id);
     } else if (mod && e.shiftKey && key === "j") {
       e.preventDefault();
       transfers.toggle();
@@ -112,7 +108,7 @@
       e.preventDefault();
       const hostId = active?.kind === "forwards" ? null : tabs.activeHostId;
       const tab = tabs.openForwards(hostId);
-      focusPanel(tab.id);
+      focusTabPanel(tab.id);
     } else if (mod && /^[1-9]$/.test(e.key)) {
       e.preventDefault();
       tabs.activateIndex(e.key === "9" ? -1 : Number(e.key) - 1);

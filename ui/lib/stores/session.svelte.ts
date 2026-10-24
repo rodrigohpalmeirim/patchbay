@@ -1,12 +1,14 @@
 // Session restore: the open tabs, their groups (split view) and per-tab
 // state are saved to localStorage as they change and brought back on launch.
 //
-// Storage: key `patchbay.session.v1`, JSON `{ version: 1, savedAt, tabs, groups,
-// focused, splitRatio }`. Tabs are stored as their (already serializable)
-// descriptors — files tabs keep their path, terminal tabs their pane tree with
-// each pane's last known directory (OSC 7). Everything is validated on load;
-// unknown kinds, tabs of deleted hosts and malformed entries are dropped. A
-// future format bumps `version` and migrates in `parse`.
+// Storage: key `patchbay.session.v1`, JSON `{ version: 2, savedAt, tabs, groups,
+// layout, focused }` (`groups` with their tab order, `layout` the split tree of
+// group ids, `focused` a group id). Version 1 had at most two groups side by
+// side (`focused` an index, `splitRatio`) and is migrated in `parse`. Tabs are
+// stored as their (already serializable) descriptors — files tabs keep their
+// path, terminal tabs their pane tree with each pane's last known directory
+// (OSC 7). Everything is validated on load; unknown kinds, tabs of deleted
+// hosts and malformed entries are dropped.
 //
 // Restored tabs start dormant (tabs.svelte.ts): nothing connects and no shell
 // starts until the tab is first shown, at which point remote files/terminal
@@ -17,20 +19,24 @@
 import { untrack } from "svelte";
 import { leaves, type PaneNode } from "../terminal/layout";
 import type { HostId } from "../types";
+import { clampRatio, type Tree } from "../util/splitTree";
 import { connections } from "./connections.svelte";
 import { hosts } from "./hosts.svelte";
 import { settings } from "./settings.svelte";
-import { SPLIT_MAX, SPLIT_MIN, tabs, type Group, type Tab } from "./tabs.svelte";
+import { tabs, type Group, type GroupNode, type Tab } from "./tabs.svelte";
 
 const KEY = "patchbay.session.v1";
-const VERSION = 1;
+const VERSION = 2;
 const SAVE_DELAY = 400;
 const MAX_TABS = 200;
 const MAX_DEPTH = 16;
+const MAX_GROUPS = 32;
 
 interface SavedGroup {
+  id: string;
   tabIds: string[];
   activeId: string | null;
+  previewId: string | null;
 }
 
 interface SavedSession {
@@ -38,8 +44,8 @@ interface SavedSession {
   savedAt: number;
   tabs: Tab[];
   groups: SavedGroup[];
-  focused: number;
-  splitRatio: number;
+  layout: GroupNode;
+  focused: string;
 }
 
 // ------------------------------------------------------------- serialize
@@ -49,9 +55,9 @@ function snapshot(): SavedSession {
     version: VERSION,
     savedAt: Date.now(),
     tabs: $state.snapshot(tabs.list) as Tab[],
-    groups: tabs.groups.map((g) => ({ tabIds: [...g.tabIds], activeId: g.activeId })),
-    focused: tabs.focused,
-    splitRatio: tabs.splitRatio,
+    groups: tabs.groups.map((g) => ({ id: g.id, tabIds: [...g.tabIds], activeId: g.activeId, previewId: g.previewId })),
+    layout: $state.snapshot(tabs.layout) as GroupNode,
+    focused: tabs.focusedGroup,
   };
 }
 
@@ -62,17 +68,22 @@ const isObj = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.i
 const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 && v.length < 4096 ? v : null);
 const optStr = (v: unknown): string | null => (typeof v === "string" && v.length < 4096 ? v : null);
 
-function parseLayout(raw: unknown, depth = 0): PaneNode | null {
+/** Parses a split tree, with `leaf` parsing (or dropping) its leaves. */
+function parseTree<L extends { type: string; id: string }>(raw: unknown, leaf: (raw: Obj, id: string) => L | null, depth = 0): Tree<L> | null {
   if (!isObj(raw) || depth > MAX_DEPTH) return null;
   const id = str(raw.id);
   if (!id) return null;
-  if (raw.type === "pane") return { type: "pane", id, cwd: optStr(raw.cwd) };
-  if (raw.type !== "split" || (raw.dir !== "row" && raw.dir !== "column")) return null;
-  const a = parseLayout(raw.a, depth + 1);
-  const b = parseLayout(raw.b, depth + 1);
+  if (raw.type !== "split") return leaf(raw, id);
+  if (raw.dir !== "row" && raw.dir !== "column") return null;
+  const a = parseTree(raw.a, leaf, depth + 1);
+  const b = parseTree(raw.b, leaf, depth + 1);
   if (!a || !b) return a ?? b;
-  const ratio = typeof raw.ratio === "number" && Number.isFinite(raw.ratio) ? Math.min(0.9, Math.max(0.1, raw.ratio)) : 0.5;
+  const ratio = typeof raw.ratio === "number" && Number.isFinite(raw.ratio) ? clampRatio(raw.ratio) : 0.5;
   return { type: "split", id, dir: raw.dir, ratio, a, b };
+}
+
+function parseLayout(raw: unknown): PaneNode | null {
+  return parseTree(raw, (r, id) => (r.type === "pane" ? { type: "pane" as const, id, cwd: optStr(r.cwd) } : null));
 }
 
 /** `currentId` maps a saved host id to the host's current id, or null if it is gone. */
@@ -114,7 +125,9 @@ function parseTab(raw: unknown, currentId: (id: HostId) => HostId | null): Tab |
 
 /** Validates stored data into a consistent layout, or null if there's nothing to restore. */
 function parse(raw: unknown, currentId: (id: HostId) => HostId | null) {
-  if (!isObj(raw) || raw.version !== VERSION || !Array.isArray(raw.tabs) || !Array.isArray(raw.groups)) return null;
+  if (!isObj(raw) || (raw.version !== 1 && raw.version !== VERSION) || !Array.isArray(raw.tabs) || !Array.isArray(raw.groups)) {
+    return null;
+  }
   const list: Tab[] = [];
   const seen = new Set<string>();
   const singletons = new Set<string>();
@@ -130,30 +143,56 @@ function parse(raw: unknown, currentId: (id: HostId) => HostId | null) {
     seen.add(tab.id);
     list.push(tab);
   }
+  const v1 = raw.version === 1;
   const placed = new Set<string>();
   const groups: Group[] = [];
-  for (const g of raw.groups.slice(0, 2)) {
+  for (const [i, g] of raw.groups.slice(0, v1 ? 2 : MAX_GROUPS).entries()) {
     if (!isObj(g) || !Array.isArray(g.tabIds)) continue;
-    const tabIds = g.tabIds.filter((id): id is string => typeof id === "string" && seen.has(id) && !placed.has(id));
-    tabIds.forEach((id) => placed.add(id));
+    const id = (!v1 && str(g.id)) || `group-restored-${i}`;
+    if (groups.some((x) => x.id === id)) continue;
+    const tabIds = g.tabIds.filter((t): t is string => typeof t === "string" && seen.has(t) && !placed.has(t));
+    tabIds.forEach((t) => placed.add(t));
     if (!tabIds.length) continue;
     const activeId = typeof g.activeId === "string" && tabIds.includes(g.activeId) ? g.activeId : tabIds[0];
-    groups.push({ id: `group-restored-${groups.length}`, tabIds, activeId });
+    const previewId = typeof g.previewId === "string" && tabIds.includes(g.previewId) ? g.previewId : null;
+    groups.push({ id, tabIds, activeId, previewId });
   }
   // Tabs missing from every group go to the first one.
   const orphans = list.filter((t) => !placed.has(t.id)).map((t) => t.id);
   if (orphans.length) {
     if (groups.length) groups[0].tabIds.push(...orphans);
-    else groups.push({ id: "group-restored-0", tabIds: orphans, activeId: orphans[0] });
+    else groups.push({ id: "group-restored-0", tabIds: orphans, activeId: orphans[0], previewId: null });
   }
   if (!groups.length) return null;
+  const ids = new Set(groups.map((g) => g.id));
+
+  let layout: GroupNode | null;
+  let focused: string | undefined;
+  if (v1) {
+    // At most two groups side by side.
+    const ratio = typeof raw.splitRatio === "number" && Number.isFinite(raw.splitRatio) ? raw.splitRatio : 0.5;
+    const [a, b] = groups.map((g) => ({ type: "group" as const, id: g.id }));
+    layout = b ? { type: "split", id: "split-restored", dir: "row", ratio: clampRatio(ratio), a, b } : a;
+    focused = typeof raw.focused === "number" ? groups[raw.focused]?.id : undefined;
+  } else {
+    // Every group appears once in the tree; others are dropped, missing ones added on the right.
+    const inTree = new Set<string>();
+    const leaf = (_: Obj, id: string) => (ids.has(id) && !inTree.has(id) ? (inTree.add(id), { type: "group" as const, id }) : null);
+    layout = parseTree(raw.layout, leaf);
+    for (const g of groups) {
+      if (inTree.has(g.id)) continue;
+      const added = { type: "group" as const, id: g.id };
+      layout = layout ? { type: "split", id: `split-restored-${g.id}`, dir: "row", ratio: 0.5, a: layout, b: added } : added;
+    }
+    focused = str(raw.focused) ?? undefined;
+  }
+  if (!layout) return null;
   const inGroups = new Set(groups.flatMap((g) => g.tabIds));
-  const ratio = typeof raw.splitRatio === "number" && Number.isFinite(raw.splitRatio) ? raw.splitRatio : 0.5;
   return {
     list: list.filter((t) => inGroups.has(t.id)),
     groups,
-    focused: typeof raw.focused === "number" && raw.focused < groups.length ? Math.max(0, Math.floor(raw.focused)) : 0,
-    splitRatio: Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, ratio)),
+    layout,
+    focusedGroup: focused && ids.has(focused) ? focused : groups[0].id,
   };
 }
 
@@ -212,8 +251,8 @@ class Session {
       $effect(() => {
         void JSON.stringify(tabs.list);
         void JSON.stringify(tabs.groups);
-        void tabs.focused;
-        void tabs.splitRatio;
+        void JSON.stringify(tabs.layout);
+        void tabs.focusedGroup;
         untrack(() => {
           clearTimeout(this.#timer);
           this.#timer = setTimeout(() => this.#save(), SAVE_DELAY);

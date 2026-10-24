@@ -162,21 +162,20 @@
   // -------------------------------------------------------------- menus
 
   function besideItems(): MenuItem[] {
-    // The side opposite this pane (created if not split yet).
-    const other = tabs.groupOf(b.tabId) === 0 ? 1 : 0;
+    // "beside": a neighbouring group, created on the right if not split yet.
     const items: MenuItem[] = [];
     items.push({
       label: "This computer",
       icon: Laptop,
-      onSelect: () => ops.openFiles(null, { reuse: b.hostId !== null, group: other }),
+      onSelect: () => ops.openFiles(null, { reuse: b.hostId !== null, group: "beside" }),
     });
     for (const h of hosts.list) {
       if (connections.get(h.id).phase !== "connected" || h.id === b.hostId) continue;
-      items.push({ label: h.name, icon: Server, onSelect: () => ops.openFiles(h.id, { reuse: true, group: other }) });
+      items.push({ label: h.name, icon: Server, onSelect: () => ops.openFiles(h.id, { reuse: true, group: "beside" }) });
     }
     if (tab) {
       items.push({ separator: true });
-      items.push({ label: "Duplicate this tab", icon: Copy, onSelect: () => tab && ops.duplicateFilesTab(tab, other) });
+      items.push({ label: "Duplicate this tab", icon: Copy, onSelect: () => tab && ops.duplicateFilesTab(tab, "beside") });
     }
     return items;
   }
