@@ -128,7 +128,8 @@ export class TermSession {
 
   constructor(
     readonly paneId: string,
-    readonly tabId: string,
+    /** Terminal tab showing the pane; changes when the pane is moved to another tab. */
+    public tabId: string,
     readonly hostId: HostId | null,
     startCwd: string | null,
     private hooks: SessionHooks,
@@ -140,6 +141,12 @@ export class TermSession {
 
   get disposed(): boolean {
     return this.#disposed;
+  }
+
+  /** Moved to another tab (see `Terminals.adopt`): its view's hooks apply from now on. */
+  rebind(tabId: string, hooks: SessionHooks) {
+    this.tabId = tabId;
+    this.hooks = hooks;
   }
 
   // -------------------------------------------------------------- setup
@@ -676,13 +683,27 @@ class Terminals {
     return paneId ? this.sessions.get(paneId) : undefined;
   }
 
+  /** The pane's session, created if needed; an existing one takes the (possibly new) tab's hooks. */
   ensure(paneId: string, tabId: string, hostId: HostId | null, cwd: string | null, hooks: SessionHooks): TermSession {
     let s = this.sessions.get(paneId);
     if (!s || s.disposed) {
       s = new TermSession(paneId, tabId, hostId, cwd, hooks);
       this.sessions.set(paneId, s);
+    } else {
+      s.rebind(tabId, hooks);
     }
     return s;
+  }
+
+  /**
+   * Hands panes over to another tab, keeping their shells. Must happen before
+   * the panes leave the old tab's layout, which disposes sessions it no longer shows.
+   */
+  adopt(paneIds: string[], tabId: string) {
+    for (const id of paneIds) {
+      const s = this.sessions.get(id);
+      if (s) s.tabId = tabId;
+    }
   }
 
   register(terminalId: string, s: TermSession) {

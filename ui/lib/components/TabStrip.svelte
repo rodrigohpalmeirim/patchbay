@@ -155,7 +155,7 @@
     {@const preview = tab.id === previewId}
     {@const title = def.title(tab, host)}
     {@const subtitle = def.subtitle?.(tab, host)}
-    <div class="tab" class:active class:preview class:dragging={dnd.tab?.id === tab.id} data-tab-wrap>
+    <div class="tab" class:active class:preview class:dragging={dnd.tab?.id === tab.id && !dnd.tab.pane} data-tab-wrap>
       <button
         type="button"
         role="tab"

@@ -10,6 +10,7 @@
   import { hosts } from "../stores/hosts.svelte";
   import { GROUP_MIN_H, GROUP_MIN_W, tabs } from "../stores/tabs.svelte";
   import { computeLayout, findSplit, type Divider, type Rect } from "../util/splitTree";
+  import { paneTitle } from "../terminal/ops";
   import { tabDef } from "../views/tabKinds";
   import TabStrip from "./TabStrip.svelte";
 
@@ -82,7 +83,18 @@
 
   const tabDrag = $derived(dnd.tab);
   const dragged = $derived(tabDrag ? tabs.get(tabDrag.id) : undefined);
-  const draggedTitle = $derived(dragged ? tabDef(dragged).title(dragged, hosts.get(dragged.hostId)) : "");
+  const draggedTitle = $derived.by(() => {
+    if (!dragged) return "";
+    if (tabDrag?.pane && dragged.kind === "terminal") return paneTitle(dragged, tabDrag.pane);
+    return tabDef(dragged).title(dragged, hosts.get(dragged.hostId));
+  });
+  const dropLabel = $derived.by(() => {
+    const t = tabDrag?.target;
+    if (!t || t.kind === "strip") return "";
+    if (t.kind === "pane") return "Add as pane";
+    if (t.edge) return "Split view";
+    return tabDrag?.pane ? "New tab here" : "Move here";
+  });
 </script>
 
 <div
@@ -147,10 +159,10 @@
     {#if strip}
       <div class="insert-line" style:left="{tabDrag.target.x - 1}px" style:top="{strip.top + 6}px" style:height="{strip.height - 6}px"></div>
     {/if}
-  {:else if tabDrag.target?.kind === "group"}
+  {:else if tabDrag.target}
     {@const r = tabDrag.target.rect}
     <div class="drop-zone" style:left="{r.left + 6}px" style:top="{r.top + 6}px" style:width="{r.width - 12}px" style:height="{r.height - 12}px">
-      <span>{tabDrag.target.edge ? "Split" : "Move here"}</span>
+      <span>{dropLabel}</span>
     </div>
   {/if}
   <div class="tab-ghost" style:left="{tabDrag.x + 12}px" style:top="{tabDrag.y + 10}px">{draggedTitle}</div>

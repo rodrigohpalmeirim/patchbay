@@ -11,20 +11,33 @@ import Minimize2 from "@lucide/svelte/icons/minimize-2";
 import RotateCw from "@lucide/svelte/icons/rotate-cw";
 import Rows2 from "@lucide/svelte/icons/rows-2";
 import Search from "@lucide/svelte/icons/search";
+import SquareArrowOutUpRight from "@lucide/svelte/icons/square-arrow-out-up-right";
 import SquareCode from "@lucide/svelte/icons/square-code";
 import TextSelect from "@lucide/svelte/icons/square-dashed-text";
 import X from "@lucide/svelte/icons/x";
 import { openFiles } from "../files/ops";
 import { connections } from "../stores/connections.svelte";
 import { hosts } from "../stores/hosts.svelte";
-import { tabs, type Placement, type TerminalTab } from "../stores/tabs.svelte";
+import { tabs, type Placement, type Tab, type TerminalTab } from "../stores/tabs.svelte";
 import { terminals } from "../stores/terminals.svelte";
 import { ui, type MenuItem } from "../stores/ui.svelte";
 import type { HostId } from "../types";
 import { tildify } from "../util/format";
 import { focusTabPanel } from "../tabFocus";
 import { keyLabel, type TermAction } from "./keys";
-import { findLeaf, leaves, neighbor, newPane, removePane, splitPane, type Direction, type SplitDir } from "./layout";
+import { dirAxis, splitLeaf } from "../util/splitTree";
+import {
+  findLeaf,
+  leaves,
+  neighbor,
+  newPane,
+  removePane,
+  splitPane,
+  type Direction,
+  type PaneLeaf,
+  type PaneNode,
+  type SplitDir,
+} from "./layout";
 
 /** Why a terminal can't be opened on this machine (null = it can, or we don't know yet). */
 export function terminalUnavailable(hostId: HostId | null): string | null {
@@ -97,19 +110,92 @@ export function split(tab: TerminalTab, paneId: string, dir: SplitDir) {
 export function closePane(tab: TerminalTab, paneId: string) {
   const live = liveTab(tab.id);
   if (!live || !findLeaf(live.layout, paneId)) return;
-  // Pick where focus goes before the layout changes.
-  const dirs: Direction[] = ["left", "up", "right", "down"];
-  const next = dirs.map((d) => neighbor(live.layout, paneId, d)).find((id) => id) ?? null;
-  const rest = removePane(live.layout, paneId);
   terminals.dispose(paneId);
-  if (!rest) {
+  if (!dropPane(live, paneId)) {
     tabs.close(live.id);
     return;
   }
-  live.layout = rest;
-  if (live.zoomedPane === paneId) live.zoomedPane = null;
-  if (live.focusedPane === paneId) live.focusedPane = next && findLeaf(rest, next) ? next : leaves(rest)[0].id;
   terminals.requestFocus(live.id);
+}
+
+/**
+ * Removes a pane from a tab's layout; focus goes to a neighbour. Returns false
+ * (and changes nothing) if it is the tab's only pane.
+ */
+function dropPane(tab: TerminalTab, paneId: string): boolean {
+  // Pick where focus goes before the layout changes.
+  const dirs: Direction[] = ["left", "up", "right", "down"];
+  const next = dirs.map((d) => neighbor(tab.layout, paneId, d)).find((id) => id) ?? null;
+  const rest = removePane(tab.layout, paneId);
+  if (!rest) return false;
+  tab.layout = rest;
+  if (tab.zoomedPane === paneId) tab.zoomedPane = null;
+  if (tab.focusedPane === paneId) tab.focusedPane = next && findLeaf(rest, next) ? next : leaves(rest)[0].id;
+  return true;
+}
+
+// ---------------------------------------------------------- moving panes
+//
+// Panes move between tabs with their shells: the session is handed to the new
+// tab (`terminals.adopt`) before it leaves the old tab's layout, and its
+// element is re-parented when the new tab's view mounts the pane.
+
+/** Can the panes of `source` join `target`? Both must be terminals on the same machine. */
+export function canJoin(source: Tab | undefined, target: Tab | undefined): boolean {
+  return source?.kind === "terminal" && target?.kind === "terminal" && source.hostId === target.hostId;
+}
+
+/**
+ * Moves a pane out of a tab with several panes into a new terminal tab, by
+ * default next to it; `index` places it in its group's strip.
+ */
+export function movePaneToTab(tab: TerminalTab, paneId: string, { group, index }: { group?: Placement; index?: number } = {}) {
+  const live = liveTab(tab.id);
+  const leaf = live && findLeaf(live.layout, paneId);
+  if (!live || !leaf || leaves(live.layout).length < 2) return;
+  const cwd = terminals.get(paneId)?.cwd ?? leaf.cwd;
+  const pane: PaneLeaf = { type: "pane", id: paneId, cwd };
+  const created = tabs.open(
+    { kind: "terminal", hostId: live.hostId, cwd, layout: pane, focusedPane: paneId, zoomedPane: null },
+    { group: group ?? tabs.groupOf(live.id) },
+  );
+  terminals.adopt([paneId], created.id);
+  dropPane(live, paneId);
+  const gid = tabs.groupOf(created.id);
+  if (index !== undefined && gid) tabs.move(created.id, index, gid);
+  terminals.requestFocus(created.id);
+}
+
+/**
+ * Puts a pane of `source` (or all of it) next to pane `targetPane` of
+ * `target`, on the `edge` side. A tab left without panes is closed.
+ */
+export function joinPanes(source: TerminalTab, sourcePane: string | null, target: TerminalTab, targetPane: string, edge: Direction) {
+  const from = liveTab(source.id);
+  const to = liveTab(target.id);
+  if (!from || !to || !canJoin(from, to) || !findLeaf(to.layout, targetPane)) return;
+  let moved: PaneNode;
+  let focus: string;
+  if (sourcePane) {
+    const leaf = findLeaf(from.layout, sourcePane);
+    if (!leaf || sourcePane === targetPane) return;
+    moved = { type: "pane", id: sourcePane, cwd: terminals.get(sourcePane)?.cwd ?? leaf.cwd };
+    focus = sourcePane;
+  } else {
+    if (from.id === to.id) return;
+    moved = JSON.parse(JSON.stringify(from.layout)) as PaneNode;
+    focus = from.focusedPane;
+  }
+  terminals.adopt(
+    leaves(moved).map((l) => l.id),
+    to.id,
+  );
+  if (!sourcePane || !dropPane(from, sourcePane)) tabs.close(from.id);
+  to.layout = splitLeaf(to.layout, targetPane, dirAxis(edge), moved, edge === "left" || edge === "up");
+  to.zoomedPane = null;
+  to.focusedPane = focus;
+  tabs.activate(to.id);
+  terminals.requestFocus(to.id);
 }
 
 /** Focuses the pane in `dir`, or past the tab's edge, the tab group there. */
@@ -199,6 +285,7 @@ export function paneMenu(tab: TerminalTab, paneId: string): MenuItem[] {
     { label: "Split down", icon: Rows2, hint: keyLabel("splitDown"), onSelect: () => runAction(tab, paneId, "splitDown") },
   ];
   if (multi) {
+    items.push({ label: "Move to new tab", icon: SquareArrowOutUpRight, onSelect: () => movePaneToTab(tab, paneId) });
     const zoomed = tab.zoomedPane === paneId;
     items.push({
       label: zoomed ? "Restore pane size" : "Maximize pane",
@@ -243,12 +330,17 @@ export function displayPath(path: string, hostId: HostId | null): string {
   return p.replace(/^\/([A-Za-z]:)/, "$1");
 }
 
-/** Tab title: the shell's window title, else its directory, else the machine. */
+/** Tab title: the focused pane's title. */
 export function terminalTitle(tab: TerminalTab): string {
-  const s = terminals.get(tab.focusedPane);
+  return paneTitle(tab, tab.focusedPane);
+}
+
+/** A pane's title: the shell's window title, else its directory, else the machine. */
+export function paneTitle(tab: TerminalTab, paneId: string): string {
+  const s = terminals.get(paneId);
   if (s?.title) return s.title;
   // Restored tabs show their remembered directory before the shell starts.
-  const cwd = s?.cwd ?? (s ? null : findLeaf(tab.layout, tab.focusedPane)?.cwd);
+  const cwd = s?.cwd ?? (s ? null : findLeaf(tab.layout, paneId)?.cwd);
   if (cwd) return displayPath(cwd, tab.hostId);
   return tab.hostId ? machineLabel(tab.hostId) : "Terminal";
 }

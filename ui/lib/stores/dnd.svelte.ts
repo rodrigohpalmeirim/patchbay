@@ -9,6 +9,7 @@
 //   [data-dir-path="<path>"]     a folder row inside a pane (drop = that folder)
 //   [data-strip-group="<id>"]    a tab strip, [data-tab-id] tabs inside it
 //   [data-group-panel="<id>"]    a group's panel (edges = split it, middle = move there)
+//   [data-terminal-pane="<id>"]  a terminal pane (edges = join that terminal tab there)
 //
 // Drops from the OS arrive through Tauri's webview drag-drop events (local
 // paths + physical position); in a plain browser only HTML5 file drags exist,
@@ -31,6 +32,7 @@ import { sentence, toCommandError } from "../util/errors";
 import { DragOut, dragIcon } from "./dragout.svelte";
 import { files } from "./files.svelte";
 import type { Direction } from "../util/splitTree";
+import { canJoin, joinPanes, movePaneToTab } from "../terminal/ops";
 import { GROUP_MIN_H, GROUP_MIN_W, tabs } from "./tabs.svelte";
 import { toasts } from "./toasts.svelte";
 import { transfers } from "./transfers.svelte";
@@ -66,10 +68,21 @@ export interface NativeDrag {
 export type TabDropTarget =
   | { kind: "strip"; group: string; index: number; x: number }
   /** Into a group (`edge` null), or a new group split off it on that side; `rect` is the highlighted area. */
-  | { kind: "group"; group: string; edge: Direction | null; rect: { left: number; top: number; width: number; height: number } };
+  | { kind: "group"; group: string; edge: Direction | null; rect: DropRect }
+  /** Terminal panes join terminal tab `tab` next to `pane`. */
+  | { kind: "pane"; tab: string; pane: string; edge: Direction; rect: DropRect };
 
+export interface DropRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** A tab, or with `pane` one pane of a terminal tab, being dragged. */
 export interface TabDrag {
   id: string;
+  pane: string | null;
   x: number;
   y: number;
   target: TabDropTarget | null;
@@ -234,8 +247,11 @@ class Dnd {
     window.addEventListener("keyup", key, true);
   }
 
-  /** Arms a tab drag (reorder, move to another group, or split). */
-  armTabDrag(e: PointerEvent, id: string) {
+  /**
+   * Arms a tab drag (reorder, move to another group, split, join a terminal),
+   * or with `pane` a drag of one pane of terminal tab `id`.
+   */
+  armTabDrag(e: PointerEvent, id: string, pane: string | null = null) {
     const sx = e.clientX;
     const sy = e.clientY;
     let started = false;
@@ -244,12 +260,12 @@ class Dnd {
         if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < THRESHOLD) return;
         started = true;
         document.body.classList.add("dragging");
-        this.tab = { id, x: ev.clientX, y: ev.clientY, target: null };
+        this.tab = { id, pane, x: ev.clientX, y: ev.clientY, target: null };
       }
       if (!this.tab) return;
       this.tab.x = ev.clientX;
       this.tab.y = ev.clientY;
-      this.tab.target = tabTarget(id, ev.clientX, ev.clientY);
+      this.tab.target = tabTarget(id, pane, ev.clientX, ev.clientY);
     };
     const key = (ev: KeyboardEvent) => {
       if (ev.key === "Escape" && this.tab) {
@@ -266,11 +282,7 @@ class Dnd {
       if (!started || !t) return;
       this.tab = null;
       this.#suppressClick();
-      const target = t.target;
-      if (!target) return;
-      if (target.kind === "strip") tabs.move(id, target.index, target.group);
-      else if (target.edge) tabs.moveToGroup(id, { split: target.edge, of: target.group });
-      else tabs.moveToGroup(id, target.group);
+      if (t.target) drop(id, pane, t.target);
     };
     const stop = () => {
       window.removeEventListener("pointermove", move);
@@ -309,10 +321,51 @@ class Dnd {
   }
 }
 
+function drop(id: string, pane: string | null, target: TabDropTarget) {
+  const tab = tabs.get(id);
+  if (target.kind === "pane") {
+    const into = tabs.get(target.tab);
+    if (tab?.kind === "terminal" && into?.kind === "terminal") joinPanes(tab, pane, into, target.pane, target.edge);
+  } else if (pane) {
+    if (tab?.kind !== "terminal") return;
+    if (target.kind === "strip") movePaneToTab(tab, pane, { group: target.group, index: target.index });
+    else movePaneToTab(tab, pane, { group: target.edge ? { split: target.edge, of: target.group } : target.group });
+  } else if (target.kind === "strip") tabs.move(id, target.index, target.group);
+  else if (target.edge) tabs.moveToGroup(id, { split: target.edge, of: target.group });
+  else tabs.moveToGroup(id, target.group);
+}
+
 /** Share of a group's width/height near each edge that splits it. */
 const EDGE = 1 / 3;
+/** The same over a terminal that the drag can join: the rest of it joins its panes. */
+const EDGE_JOINABLE = 0.12;
+/** Share of a pane's width/height near each edge that joins next to it. */
+const PANE_EDGE = 0.3;
 
-function tabTarget(id: string, x: number, y: number): TabDropTarget | null {
+/** The edge of `r` nearest to (x, y), with its distance as a share of `r`'s width or height. */
+function nearestEdge(r: DOMRect, x: number, y: number): [Direction, number] {
+  const nx = (x - r.left) / r.width;
+  const ny = (y - r.top) / r.height;
+  const near: [Direction, number][] = [
+    ["left", nx],
+    ["right", 1 - nx],
+    ["up", ny],
+    ["down", 1 - ny],
+  ];
+  return near.reduce((a, b) => (b[1] < a[1] ? b : a));
+}
+
+/** The half of `r` on the `side` side. */
+function half(r: DOMRect, side: Direction): DropRect {
+  const out = { left: r.left, top: r.top, width: r.width, height: r.height };
+  if (side === "left" || side === "right") out.width /= 2;
+  if (side === "right") out.left += out.width;
+  if (side === "up" || side === "down") out.height /= 2;
+  if (side === "down") out.top += out.height;
+  return out;
+}
+
+function tabTarget(id: string, pane: string | null, x: number, y: number): TabDropTarget | null {
   const el = document.elementFromPoint(x, y);
   const strip = el?.closest<HTMLElement>("[data-strip-group]");
   if (strip) {
@@ -335,26 +388,28 @@ function tabTarget(id: string, x: number, y: number): TabDropTarget | null {
   if (!panel || !group) return null;
   const r = panel.getBoundingClientRect();
   const own = tabs.groupOf(id) === group;
-  // The nearest edge, if close enough and there is room for two groups.
-  const nx = (x - r.left) / r.width;
-  const ny = (y - r.top) / r.height;
-  const near: [Direction, number][] = [
-    ["left", nx],
-    ["right", 1 - nx],
-    ["up", ny],
-    ["down", 1 - ny],
-  ];
-  const [edge, dist] = near.reduce((a, b) => (b[1] < a[1] ? b : a));
+  // A terminal can join the terminal shown there (a tab not into itself).
+  const shown = tabs.get(tabs.group(group)?.activeId ?? "");
+  const joinable = canJoin(tabs.get(id), shown) && (shown?.id !== id || !!pane);
+
+  // Near the group's edge: split the group, if there is room for two.
+  const [edge, dist] = nearestEdge(r, x, y);
   const room = edge === "left" || edge === "right" ? r.width / 2 >= GROUP_MIN_W : r.height / 2 >= GROUP_MIN_H;
-  // A tab alone in its group can't split it.
-  const side = dist < EDGE && room && (!own || tabs.canSplit(id)) ? edge : null;
-  if (!side && own) return null;
-  const rect = { left: r.left, top: r.top, width: r.width, height: r.height };
-  if (side === "left" || side === "right") rect.width /= 2;
-  if (side === "right") rect.left += rect.width;
-  if (side === "up" || side === "down") rect.height /= 2;
-  if (side === "down") rect.top += rect.height;
-  return { kind: "group", group, edge: side, rect };
+  // A tab alone in its group can't split it (a pane can: it leaves as a new tab).
+  if (dist < (joinable ? EDGE_JOINABLE : EDGE) && room && (!own || !!pane || tabs.canSplit(id))) {
+    return { kind: "group", group, edge, rect: half(r, edge) };
+  }
+  // Near a pane's edge: join next to it.
+  const paneEl = joinable ? el?.closest<HTMLElement>("[data-terminal-pane]") : null;
+  const target = paneEl?.dataset.terminalPane;
+  if (paneEl && target && target !== pane && shown) {
+    const pr = paneEl.getBoundingClientRect();
+    const [side, d] = nearestEdge(pr, x, y);
+    if (d < PANE_EDGE) return { kind: "pane", tab: shown.id, pane: target, edge: side, rect: half(pr, side) };
+  }
+  // The middle: into the group.
+  if (own) return null;
+  return { kind: "group", group, edge: null, rect: { left: r.left, top: r.top, width: r.width, height: r.height } };
 }
 
 export const dnd = new Dnd();

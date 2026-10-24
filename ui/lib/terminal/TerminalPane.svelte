@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
+  import GripHorizontal from "@lucide/svelte/icons/grip-horizontal";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Plug from "@lucide/svelte/icons/plug";
   import RotateCw from "@lucide/svelte/icons/rotate-cw";
@@ -14,6 +15,7 @@
   import { untrack } from "svelte";
   import { editHost } from "../actions";
   import { connections } from "../stores/connections.svelte";
+  import { dnd } from "../stores/dnd.svelte";
   import { prompts } from "../stores/prompts.svelte";
   import { settings } from "../stores/settings.svelte";
   import type { TerminalTab } from "../stores/tabs.svelte";
@@ -126,6 +128,19 @@
     if (tab.focusedPane !== session.paneId) focusPane(tab, session.paneId, false);
   }
 
+  // The grip: drag the pane to another spot, tab or group; click for the pane menu.
+  function ongrippointerdown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dnd.armTabDrag(e, tab.id, session.paneId);
+  }
+
+  function ongripclick(e: MouseEvent) {
+    if (dnd.justDropped) return;
+    focusPane(tab, session.paneId, false);
+    showPaneMenu(tab, session.paneId, e.currentTarget as HTMLElement);
+  }
+
   function connect() {
     if (host) void connections.connect(host.id);
   }
@@ -150,6 +165,7 @@
   class:dim={multi && !focused}
   class:covered={hidden}
   class:flash={flashing}
+  class:dragging={dnd.tab?.pane === session.paneId}
   style:left="{rect.x * 100}%"
   style:top="{rect.y * 100}%"
   style:width="{rect.w * 100}%"
@@ -160,6 +176,19 @@
   onpointerdowncapture={onpointerdown}
 >
   <div class="mount" bind:this={mount}></div>
+  {#if multi && !hidden && !session.findOpen}
+    <button
+      type="button"
+      class="grip"
+      aria-label="Move pane"
+      aria-haspopup="menu"
+      title="Drag to move this pane, click for pane actions"
+      onpointerdown={ongrippointerdown}
+      onclick={ongripclick}
+    >
+      <GripHorizontal size={14} />
+    </button>
+  {/if}
 
   {#if session.findOpen}
     <FindBar {session} />
@@ -286,6 +315,36 @@
     overflow: hidden;
     background: var(--bg);
     container-type: inline-size;
+  }
+  .pane.dragging {
+    opacity: 0.5;
+  }
+  .grip {
+    position: absolute;
+    top: 4px;
+    left: 50%;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 16px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-full);
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    cursor: grab;
+    opacity: 0;
+    transform: translateX(-50%);
+    transition: opacity var(--dur-fast);
+  }
+  .pane:hover .grip,
+  .grip:focus-visible {
+    opacity: 1;
+  }
+  .grip:hover {
+    color: var(--text);
   }
   .pane.covered {
     visibility: hidden;

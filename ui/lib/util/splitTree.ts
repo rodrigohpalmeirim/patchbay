@@ -73,10 +73,10 @@ export function findSplit<L extends Leaf>(node: Tree<L>, id: string): Split<L> |
 }
 
 /**
- * Replaces leaf `id` with a split of it and `added`, which goes after/below
- * it, or before/above with `before`.
+ * Replaces leaf `id` with a split of it and `added` (a leaf or a whole tree),
+ * which goes after/below it, or before/above with `before`.
  */
-export function splitLeaf<L extends Leaf>(node: Tree<L>, id: string, dir: SplitDir, added: L, before = false): Tree<L> {
+export function splitLeaf<L extends Leaf>(node: Tree<L>, id: string, dir: SplitDir, added: Tree<L>, before = false): Tree<L> {
   if (!isSplit(node)) {
     if (node.id !== id) return node;
     const [a, b] = before ? [added, node] : [node, added];
