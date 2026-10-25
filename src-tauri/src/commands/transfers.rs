@@ -1,19 +1,23 @@
 //! The transfer queue. Progress arrives as `transfer` core events and
-//! conflicts as `fileConflict` prompts.
+//! conflicts as `fileConflict` prompts (shown in the window that started or
+//! last retried the transfer).
 
 use patchbay_core::model::{TransferInfo, TransferRequest};
-use tauri::State;
+use tauri::{State, Webview};
 use uuid::Uuid;
 
 use crate::error::CommandResult;
-use crate::state::AppState;
+use crate::state::{AppState, Origin};
 
 #[tauri::command]
 pub async fn transfer_start(
     state: State<'_, AppState>,
+    webview: Webview,
     request: TransferRequest,
 ) -> CommandResult<TransferInfo> {
-    Ok(state.transfers.start(request)?)
+    let info = state.transfers.start(request)?;
+    state.set_origin(Origin::Transfer(info.id), webview.label());
+    Ok(info)
 }
 
 #[tauri::command]
@@ -37,7 +41,12 @@ pub async fn transfer_cancel(state: State<'_, AppState>, id: Uuid) -> CommandRes
 }
 
 #[tauri::command]
-pub async fn transfer_retry(state: State<'_, AppState>, id: Uuid) -> CommandResult<()> {
+pub async fn transfer_retry(
+    state: State<'_, AppState>,
+    webview: Webview,
+    id: Uuid,
+) -> CommandResult<()> {
+    state.set_origin(Origin::Transfer(id), webview.label());
     Ok(state.transfers.retry(id)?)
 }
 

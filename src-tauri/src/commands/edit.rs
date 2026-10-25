@@ -1,16 +1,17 @@
 //! Editing remote files in local applications, and opening local files.
 //! Session changes arrive as `edit` core events, conflicts as
-//! `editConflict` prompts.
+//! `editConflict` prompts (shown in the window that opened or last retried
+//! the session).
 
 use std::path::Path;
 
 use patchbay_core::model::{EditSession, HostId};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, State, Webview};
 use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 
 use crate::error::{CommandError, CommandResult};
-use crate::state::AppState;
+use crate::state::{AppState, Origin};
 
 fn open_with_default_app(app: &AppHandle, path: &str) -> CommandResult<()> {
     app.opener()
@@ -27,10 +28,12 @@ fn open_with_default_app(app: &AppHandle, path: &str) -> CommandResult<()> {
 pub async fn edit_open(
     app: AppHandle,
     state: State<'_, AppState>,
+    webview: Webview,
     host_id: HostId,
     path: String,
 ) -> CommandResult<EditSession> {
     let session = state.edits.open(Some(&host_id), &path).await?;
+    state.set_origin(Origin::Edit(session.id), webview.label());
     open_with_default_app(&app, &session.local_path)?;
     Ok(session)
 }
@@ -52,7 +55,8 @@ pub async fn edit_close(
 }
 
 #[tauri::command]
-pub fn edit_retry(state: State<'_, AppState>, id: Uuid) -> CommandResult<()> {
+pub fn edit_retry(state: State<'_, AppState>, webview: Webview, id: Uuid) -> CommandResult<()> {
+    state.set_origin(Origin::Edit(id), webview.label());
     Ok(state.edits.retry(id)?)
 }
 

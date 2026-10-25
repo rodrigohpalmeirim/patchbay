@@ -1,9 +1,9 @@
-//! The system tray icon and its menu: show the window, toggle port forwards,
-//! disconnect hosts, quit.
+//! The system tray icon and its menu: show the windows, open a new one,
+//! toggle port forwards, disconnect hosts, quit.
 //!
 //! The menu is rebuilt (debounced) when connections, forwards or hosts
 //! change, and only if what it shows actually changed, so traffic updates do
-//! not churn it. Left-clicking the icon shows the window where the platform
+//! not churn it. Left-clicking the icon shows the windows where the platform
 //! reports clicks (Windows, macOS); on Linux (AppIndicator) only the menu is
 //! available. Without a tray host (e.g. a bare X session) the icon simply
 //! does not appear.
@@ -24,6 +24,7 @@ const TRAY_ID: &str = "main";
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
 const SHOW: &str = "show";
+const NEW_WINDOW: &str = "new-window";
 const QUIT: &str = "quit";
 const FORWARD: &str = "forward:";
 const DISCONNECT: &str = "disconnect:";
@@ -177,6 +178,13 @@ fn menu(app: &AppHandle, model: &Model) -> tauri::Result<Menu<Wry>> {
         true,
         None::<&str>,
     )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        NEW_WINDOW,
+        "New window",
+        true,
+        None::<&str>,
+    )?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
 
     menu.append(&MenuItem::with_id(
@@ -247,6 +255,13 @@ fn menu(app: &AppHandle, model: &Model) -> tauri::Result<Menu<Wry>> {
 fn on_menu(app: &AppHandle, id: &str) {
     if id == SHOW {
         window::reveal(app);
+    } else if id == NEW_WINDOW {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = window::open(&app, None) {
+                tracing::warn!("could not open a window: {e}");
+            }
+        });
     } else if id == QUIT {
         crate::quit(app);
     } else if let Some(forward) = id.strip_prefix(FORWARD) {

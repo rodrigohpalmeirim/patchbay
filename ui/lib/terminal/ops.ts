@@ -141,7 +141,7 @@ function dropPane(tab: TerminalTab, paneId: string): boolean {
 // element is re-parented when the new tab's view mounts the pane.
 
 /** Can the panes of `source` join `target`? Both must be terminals on the same machine. */
-export function canJoin(source: Tab | undefined, target: Tab | undefined): boolean {
+export function canJoin(source: { kind: string; hostId: HostId | null } | undefined, target: Tab | undefined): boolean {
   return source?.kind === "terminal" && target?.kind === "terminal" && source.hostId === target.hostId;
 }
 
@@ -191,6 +191,15 @@ export function joinPanes(source: TerminalTab, sourcePane: string | null, target
     to.id,
   );
   if (!sourcePane || !dropPane(from, sourcePane)) tabs.close(from.id);
+  graftPanes(to, targetPane, edge, moved, focus);
+}
+
+/**
+ * Puts panes `moved` (already handed to `to`, or moved here from another
+ * window) next to pane `targetPane` of `to` on the `edge` side, and focuses
+ * pane `focus`.
+ */
+export function graftPanes(to: TerminalTab, targetPane: string, edge: Direction, moved: PaneNode, focus: string) {
   to.layout = splitLeaf(to.layout, targetPane, dirAxis(edge), moved, edge === "left" || edge === "up");
   to.zoomedPane = null;
   to.focusedPane = focus;

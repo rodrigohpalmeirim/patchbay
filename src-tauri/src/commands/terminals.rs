@@ -6,7 +6,7 @@ use tauri::ipc::Channel;
 use tauri::{State, Webview};
 use uuid::Uuid;
 
-use crate::error::CommandResult;
+use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -49,6 +49,59 @@ pub async fn terminal_close(state: State<'_, AppState>, id: Uuid) -> CommandResu
 #[tauri::command]
 pub fn terminal_ack(state: State<'_, AppState>, id: Uuid, bytes: u64) {
     state.streams.ack(id, bytes);
+}
+
+fn not_handed_over(id: Uuid) -> CommandError {
+    CommandError {
+        kind: "notFound",
+        message: format!("terminal {id} is not available to this window"),
+    }
+}
+
+/// First step of moving a terminal to another window: stops sending its
+/// output to the calling webview and returns how many bytes were sent, so
+/// the caller can wait for them before serializing the screen. Then
+/// `window_move_tab` hands it over, or `terminal_resume` undoes this.
+#[tauri::command]
+pub fn terminal_detach(
+    state: State<'_, AppState>,
+    webview: Webview,
+    id: Uuid,
+) -> CommandResult<u64> {
+    state
+        .streams
+        .pause(id, webview.label())
+        .ok_or_else(|| not_handed_over(id))
+}
+
+/// The move did not happen: output goes to the calling webview again.
+#[tauri::command]
+pub fn terminal_resume(
+    state: State<'_, AppState>,
+    webview: Webview,
+    id: Uuid,
+) -> CommandResult<()> {
+    if state.streams.resume(id, webview.label()) {
+        Ok(())
+    } else {
+        Err(not_handed_over(id))
+    }
+}
+
+/// Takes over a terminal moved to the calling webview (`window_move_tab`):
+/// its output continues into `on_data`.
+#[tauri::command]
+pub fn terminal_attach(
+    state: State<'_, AppState>,
+    webview: Webview,
+    id: Uuid,
+    on_data: Channel,
+) -> CommandResult<()> {
+    if state.streams.attach(id, webview.label(), on_data) {
+        Ok(())
+    } else {
+        Err(not_handed_over(id))
+    }
 }
 
 #[tauri::command]

@@ -6,11 +6,10 @@
   fills that gap.
 -->
 <script lang="ts">
-  import { dnd } from "../stores/dnd.svelte";
   import { hosts } from "../stores/hosts.svelte";
   import { GROUP_MIN_H, GROUP_MIN_W, tabs } from "../stores/tabs.svelte";
+  import { ui } from "../stores/ui.svelte";
   import { computeLayout, findSplit, type Divider, type Rect } from "../util/splitTree";
-  import { paneTitle } from "../terminal/ops";
   import { tabDef } from "../views/tabKinds";
   import TabStrip from "./TabStrip.svelte";
 
@@ -80,21 +79,6 @@
     else return;
     e.preventDefault();
   }
-
-  const tabDrag = $derived(dnd.tab);
-  const dragged = $derived(tabDrag ? tabs.get(tabDrag.id) : undefined);
-  const draggedTitle = $derived.by(() => {
-    if (!dragged) return "";
-    if (tabDrag?.pane && dragged.kind === "terminal") return paneTitle(dragged, tabDrag.pane);
-    return tabDef(dragged).title(dragged, hosts.get(dragged.hostId));
-  });
-  const dropLabel = $derived.by(() => {
-    const t = tabDrag?.target;
-    if (!t || t.kind === "strip") return "";
-    if (t.kind === "pane") return "Add as pane";
-    if (t.edge) return "Split view";
-    return tabDrag?.pane ? "New tab here" : "Move here";
-  });
 </script>
 
 <div
@@ -104,8 +88,9 @@
   bind:this={area}
 >
   {#each tabs.groups as g (g.id)}
-    <div class="strip-slot" style={stripStyle(layout.rects.get(g.id))}>
-      <TabStrip group={g.id} focused={tabs.isSplit && tabs.focusedGroup === g.id} />
+    {@const r = layout.rects.get(g.id)}
+    <div class="strip-slot" style={stripStyle(r)}>
+      <TabStrip group={g.id} focused={tabs.isSplit && tabs.focusedGroup === g.id} sidebarButton={!ui.sidebarOpen && !gap(r?.x ?? 0) && !gap(r?.y ?? 0)} />
     </div>
   {/each}
 
@@ -152,21 +137,6 @@
     ></div>
   {/each}
 </div>
-
-{#if tabDrag}
-  {#if tabDrag.target?.kind === "strip"}
-    {@const strip = document.querySelector(`[data-strip-group="${tabDrag.target.group}"]`)?.getBoundingClientRect()}
-    {#if strip}
-      <div class="insert-line" style:left="{tabDrag.target.x - 1}px" style:top="{strip.top + 6}px" style:height="{strip.height - 6}px"></div>
-    {/if}
-  {:else if tabDrag.target}
-    {@const r = tabDrag.target.rect}
-    <div class="drop-zone" style:left="{r.left + 6}px" style:top="{r.top + 6}px" style:width="{r.width - 12}px" style:height="{r.height - 12}px">
-      <span>{dropLabel}</span>
-    </div>
-  {/if}
-  <div class="tab-ghost" style:left="{tabDrag.x + 12}px" style:top="{tabDrag.y + 10}px">{draggedTitle}</div>
-{/if}
 
 <style>
   .workspace {
@@ -220,52 +190,6 @@
     cursor: row-resize;
   }
   .resizing .panel {
-    pointer-events: none;
-  }
-  .drop-zone {
-    position: fixed;
-    display: grid;
-    place-items: center;
-    border: 2px dashed var(--accent);
-    border-radius: var(--radius-lg);
-    background: var(--accent-soft);
-    pointer-events: none;
-    z-index: 1000;
-    transition:
-      left var(--dur-fast),
-      top var(--dur-fast),
-      width var(--dur-fast),
-      height var(--dur-fast);
-  }
-  .drop-zone span {
-    padding: 6px 12px;
-    border-radius: var(--radius-full);
-    background: var(--accent);
-    color: var(--text-on-accent);
-    font-size: var(--text-sm);
-    font-weight: var(--weight-medium);
-  }
-  .insert-line {
-    position: fixed;
-    width: 2px;
-    border-radius: 1px;
-    background: var(--accent);
-    pointer-events: none;
-    z-index: 1001;
-  }
-  .tab-ghost {
-    position: fixed;
-    z-index: 1001;
-    max-width: 220px;
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
-    box-shadow: var(--shadow-md);
-    font-size: var(--text-sm);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
     pointer-events: none;
   }
 </style>

@@ -427,3 +427,70 @@ export interface AppSettings {
   /** List the devices of the user's tailnet. */
   tailscale: boolean;
 }
+
+// ---------------------------------------------------------------- windows
+
+/** Roles among the open windows (`windows-changed`), by window label. */
+export interface WindowsInfo {
+  /** Runs once-per-app work (update checks): the oldest open window. */
+  leader: string | null;
+  /** Most recently focused: gets prompts nobody asked for in particular. */
+  active: string | null;
+  count: number;
+  /** The open windows, most recently focused first. */
+  windows: WindowSummary[];
+}
+
+/** How a window describes itself to the others ("Move to window" menus). */
+export interface WindowSummary {
+  label: string;
+  /** Title of its active tab. */
+  title: string | null;
+  tabs: number;
+  /** Its place among the open windows in the order they were opened (1: the oldest). */
+  number: number;
+}
+
+/** A point on screen, in CSS pixels. */
+export interface ScreenPoint {
+  x: number;
+  y: number;
+}
+
+/** A tab dragged out of its window, as other windows see it while it hovers over them. */
+export interface DraggedTab {
+  id: string;
+  kind: string;
+  hostId: HostId | null;
+  /** As its tab strip shows it. */
+  title: string;
+}
+
+/** The window under a tab dragged out of another one, and the pointer in its viewport (CSS pixels). */
+export interface TabDragOver {
+  label: string;
+  x: number;
+  y: number;
+}
+
+/** A tab of another window dragged over this one, at (`x`, `y`) in this viewport. */
+export interface TabDragIn {
+  tab: DraggedTab;
+  x: number;
+  y: number;
+}
+
+export interface WindowInfo extends WindowsInfo {
+  /** This window's label. */
+  label: string;
+}
+
+/** What was saved for a window. */
+export interface WindowSession {
+  /** Its tabs (`ui/lib/stores/session.svelte.ts` format), unless they aren't restored. */
+  session: unknown;
+  /** Its sidebar is hidden (kept even when tabs aren't restored). */
+  sidebarHidden: boolean;
+  /** Nothing saved yet: take over the single-window session of earlier versions. */
+  migrate: boolean;
+}

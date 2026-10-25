@@ -50,7 +50,9 @@ export const RATIO_MIN = 0.1;
 export const RATIO_MAX = 0.9;
 
 let seq = 0;
-export const newId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${(seq++).toString(36)}`;
+/** Tells apart ids made in different windows at the same time, so a tab handed to another window stays unique there. */
+const page = Math.random().toString(36).slice(2, 6);
+export const newId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${page}${(seq++).toString(36)}`;
 
 const isSplit = <L extends Leaf>(node: Tree<L>): node is Split<L> => node.type === "split";
 

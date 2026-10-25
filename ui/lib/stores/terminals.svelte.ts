@@ -8,6 +8,15 @@
 // buffers and parses in time slices); nothing per-chunk touches Svelte state.
 // Input path: keystrokes are coalesced and sent one write at a time so they
 // arrive in order even though IPC calls may complete out of order.
+//
+// Moving a pane to another window keeps its shell: the source pauses the
+// backend stream (`terminalDetach`, which says how many bytes were sent
+// here), waits until they have arrived and been parsed, and serializes the
+// screen and scrollback (`handOver`). The target window builds the pane
+// from that snapshot, then attaches a new output channel
+// (`terminalAttach`); output produced meanwhile waits in the backend. The
+// source then `release`s its session without closing the shell, or, if the
+// move failed, `resume`s it. See `windows.moveTab` and src-tauri/src/streams.rs.
 
 import type { FitAddon } from "@xterm/addon-fit";
 import type { ISearchOptions, SearchAddon } from "@xterm/addon-search";
@@ -16,7 +25,7 @@ import { SvelteMap } from "svelte/reactivity";
 import { isTauri } from "../api";
 import type { TermAction } from "../terminal/keys";
 import { passesToApp, terminalAction } from "../terminal/keys";
-import { disableWebgl, loadWebgl, loadXterm, searchDecorations, terminalTheme } from "../terminal/xterm";
+import { disableWebgl, loadWebgl, loadXterm, searchDecorations, serializeTerminal, terminalTheme } from "../terminal/xterm";
 import type { CommandError, CoreEvent, HostId } from "../types";
 import { toCommandError } from "../util/errors";
 import { isMac, isWindows } from "../util/platform";
@@ -50,6 +59,23 @@ export interface SessionHooks {
   onCwd(cwd: string): void;
 }
 
+/** A pane as handed to another window (see the header). */
+export interface PaneHandover {
+  /** Its shell, paused until the target attaches; null if none is running. */
+  terminalId: string | null;
+  /** Screen and scrollback as escape sequences (null: xterm never started). */
+  screen: string | null;
+  /** Size the screen was laid out in. */
+  cols: number;
+  rows: number;
+  title: string | null;
+  cwd: string | null;
+  shell: string | null;
+  started: boolean;
+  /** How the shell ended, if it did (null with no terminal: start a new one). */
+  exit: ExitInfo | null;
+}
+
 export interface LinkHover {
   x: number;
   y: number;
@@ -58,6 +84,8 @@ export interface LinkHover {
 
 const RESIZE_DEBOUNCE = 80;
 const PASTE_CONFIRM_PREVIEW = 40;
+/** How long a pane being moved waits for output already sent to it. */
+const HANDOVER_DRAIN_TIMEOUT = 5000;
 
 function parseOsc7(data: string): string | null {
   try {
@@ -125,6 +153,13 @@ export class TermSession {
   #ackTimer: ReturnType<typeof setTimeout> | undefined;
   #copyTimer: ReturnType<typeof setTimeout> | undefined;
   #disconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Output bytes received on the current channel, and a waiter for more (`handOver`). */
+  #bytesIn = 0;
+  #onBytes: (() => void) | null = null;
+  /** Output paused for a move to another window. */
+  #detached = false;
+  /** Moved here from another window: built from this once xterm is up. */
+  #incoming: PaneHandover | null;
 
   constructor(
     readonly paneId: string,
@@ -133,10 +168,22 @@ export class TermSession {
     readonly hostId: HostId | null,
     startCwd: string | null,
     private hooks: SessionHooks,
+    incoming: PaneHandover | null = null,
   ) {
-    this.cwd = startCwd;
+    this.cwd = incoming?.cwd ?? startCwd;
     this.el = document.createElement("div");
     this.el.className = "term-host";
+    this.#incoming = incoming;
+    if (incoming) {
+      this.title = incoming.title;
+      this.shell = incoming.shell;
+      this.started = incoming.started;
+      // Ours from now on: closed if this pane goes before taking it over.
+      if (incoming.terminalId) {
+        this.terminalId = incoming.terminalId;
+        terminals.register(incoming.terminalId, this);
+      }
+    }
   }
 
   get disposed(): boolean {
@@ -177,8 +224,11 @@ export class TermSession {
     const dark = settings.resolvedTheme === "dark";
     const os = this.hostId ? connections.get(this.hostId).capabilities?.os : null;
     const windowsPty = os === "windows" || (!this.hostId && /Win/.test(navigator.platform));
+    const incoming = this.#incoming;
     const term = new x.Terminal({
       allowProposedApi: true,
+      // A moved screen is restored at the size it was laid out in, then fitted.
+      ...(incoming?.screen ? { cols: incoming.cols, rows: incoming.rows } : {}),
       fontFamily: prefs.fontFamily.trim() || DEFAULT_TERMINAL_FONT,
       fontSize: prefs.fontSize,
       lineHeight: prefs.lineHeight,
@@ -251,6 +301,11 @@ export class TermSession {
 
     this.#ro = new ResizeObserver(() => this.scheduleFit());
     this.#ro.observe(this.el);
+    if (incoming) {
+      this.#incoming = null;
+      void this.#takeOver(term, incoming);
+      return;
+    }
     this.fitNow();
     void this.open();
   }
@@ -360,13 +415,7 @@ export class TermSession {
     this.fitNow();
     try {
       const info = await call(
-        (b) =>
-          b.terminalOpen({ hostId, cwd: this.cwd, cols: term.cols, rows: term.rows }, (data) => {
-            if (gen !== this.#gen || !data.length) return;
-            term.write(data, () => {
-              if (gen === this.#gen) this.#ack(data.length);
-            });
-          }),
+        (b) => b.terminalOpen({ hostId, cwd: this.cwd, cols: term.cols, rows: term.rows }, this.#sink(gen, term)),
         { toast: false },
       );
       if (gen !== this.#gen || this.#disposed) {
@@ -395,6 +444,139 @@ export class TermSession {
       this.status = "failed";
       this.error = error;
     }
+  }
+
+  /** Handles the output channel of shell `gen`. */
+  #sink(gen: number, term: Terminal): (data: Uint8Array) => void {
+    this.#bytesIn = 0;
+    return (data) => {
+      if (gen !== this.#gen || !data.length) return;
+      this.#bytesIn += data.length;
+      this.#onBytes?.();
+      term.write(data, () => {
+        if (gen === this.#gen) this.#ack(data.length);
+      });
+    };
+  }
+
+  // ------------------------------------------------- moving to a window
+
+  /**
+   * Prepares moving this pane to another window (see the header): pauses
+   * the shell's output here and snapshots the screen once everything sent
+   * here is in it. Follow up with `release` (moved) or `resume` (not moved).
+   */
+  async handOver(): Promise<PaneHandover> {
+    const term = this.term;
+    const id = this.status === "running" ? this.terminalId : null;
+    let terminalId: string | null = null;
+    if (id) {
+      const sent = await attempt((b) => b.terminalDetach(id), { toast: false });
+      // Not available: the shell has just ended.
+      if (sent !== undefined) {
+        terminalId = id;
+        this.#detached = true;
+      }
+      if (sent !== undefined && !(await this.#received(sent))) {
+        this.resume();
+        throw new Error("the terminal's output didn't arrive");
+      }
+    }
+    let screen: string | null = null;
+    try {
+      if (term) {
+        await new Promise<void>((resolve) => term.write("", resolve));
+        screen = await serializeTerminal(term);
+      }
+    } catch (e) {
+      this.resume();
+      throw e;
+    }
+    const ended = !terminalId && (this.status === "running" || this.status === "exited");
+    return {
+      terminalId,
+      screen,
+      cols: term?.cols ?? 80,
+      rows: term?.rows ?? 24,
+      title: this.title,
+      cwd: this.cwd,
+      shell: this.shell,
+      started: this.started,
+      exit: ended ? (this.exit ?? { code: null, reason: null }) : null,
+    };
+  }
+
+  /** Waits until `bytes` bytes of output have arrived here. False on timeout. */
+  #received(bytes: number): Promise<boolean> {
+    if (this.#bytesIn >= bytes) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const done = (ok: boolean) => {
+        clearTimeout(timer);
+        this.#onBytes = null;
+        resolve(ok);
+      };
+      const timer = setTimeout(() => done(false), HANDOVER_DRAIN_TIMEOUT);
+      this.#onBytes = () => {
+        if (this.#bytesIn >= bytes) done(true);
+      };
+    });
+  }
+
+  /** The move didn't happen: the shell's output comes here again. */
+  resume() {
+    const id = this.terminalId;
+    if (!this.#detached || !id) return;
+    this.#detached = false;
+    void attempt((b) => b.terminalResume(id), { toast: false });
+  }
+
+  /** Moved to another window: lets go of the shell (without closing it) and disposes the rest. */
+  release() {
+    if (this.terminalId) terminals.unregister(this.terminalId);
+    this.terminalId = null;
+    clearTimeout(this.#ackTimer);
+    this.#unacked = 0;
+    this.dispose();
+  }
+
+  /** Builds a pane moved here from another window: its screen, then its shell. */
+  async #takeOver(term: Terminal, h: PaneHandover) {
+    if (h.screen) {
+      const screen = h.screen;
+      await new Promise<void>((resolve) => term.write(screen, resolve));
+    }
+    if (this.#disposed) return;
+    this.fitNow();
+    const id = h.terminalId;
+    if (!id) {
+      // No shell came along: show how it ended, or start one.
+      if (h.exit) {
+        this.status = "exited";
+        this.exit = h.exit;
+      } else {
+        void this.open();
+      }
+      return;
+    }
+    const gen = ++this.#gen;
+    this.status = "opening";
+    try {
+      await call((b) => b.terminalAttach(id, this.#sink(gen, term)), { toast: false });
+    } catch {
+      if (gen !== this.#gen || this.#disposed) return;
+      terminals.unregister(id);
+      this.terminalId = null;
+      this.status = "exited";
+      this.exit = { code: null, reason: "the shell was lost while moving it to this window" };
+      return;
+    }
+    if (gen !== this.#gen || this.#disposed) return;
+    this.status = "running";
+    if (this.#writeBuf && !this.#writing) void this.#flushWrites();
+    // The shell still has the old window's size.
+    this.#sentSize = { cols: 0, rows: 0 };
+    this.fitNow();
+    this.#sendSize();
   }
 
   /** The shell ended (backend `terminalExit`). */
@@ -682,6 +864,8 @@ class Terminals {
   #byTerminalId = new Map<string, TermSession>();
   /** Exits that arrived before terminalOpen resolved. */
   #early = new Map<string, ExitInfo>();
+  /** Panes moved here from another window, until their sessions are created. */
+  #incoming = new Map<string, PaneHandover>();
 
   requestFocus(tabId: string) {
     this.focusRequest = tabId;
@@ -695,7 +879,9 @@ class Terminals {
   ensure(paneId: string, tabId: string, hostId: HostId | null, cwd: string | null, hooks: SessionHooks): TermSession {
     let s = this.sessions.get(paneId);
     if (!s || s.disposed) {
-      s = new TermSession(paneId, tabId, hostId, cwd, hooks);
+      const incoming = this.#incoming.get(paneId) ?? null;
+      this.#incoming.delete(paneId);
+      s = new TermSession(paneId, tabId, hostId, cwd, hooks, incoming);
       this.sessions.set(paneId, s);
     } else {
       s.rebind(tabId, hooks);
@@ -712,6 +898,40 @@ class Terminals {
       const s = this.sessions.get(id);
       if (s) s.tabId = tabId;
     }
+  }
+
+  /**
+   * Prepares moving panes to another window (`TermSession.handOver`), by
+   * pane id. Panes without a session aren't included. If one fails, the
+   * others are resumed and this throws.
+   */
+  async handOver(paneIds: string[]): Promise<Record<string, PaneHandover>> {
+    const live = paneIds.map((id) => this.sessions.get(id)).filter((s): s is TermSession => !!s && !s.disposed);
+    const results = await Promise.allSettled(live.map((s) => s.handOver()));
+    const failed = results.find((r) => r.status === "rejected");
+    if (failed) {
+      live.forEach((s) => s.resume());
+      throw failed.reason;
+    }
+    return Object.fromEntries(live.map((s, i) => [s.paneId, (results[i] as PromiseFulfilledResult<PaneHandover>).value]));
+  }
+
+  /** The panes didn't move after all (see `handOver`). */
+  resume(paneIds: string[]) {
+    for (const id of paneIds) this.sessions.get(id)?.resume();
+  }
+
+  /** The panes moved to another window: drops their sessions, leaving the shells running. */
+  release(paneIds: string[]) {
+    for (const id of paneIds) {
+      this.sessions.get(id)?.release();
+      this.sessions.delete(id);
+    }
+  }
+
+  /** Panes about to arrive from another window; their sessions are built from these. */
+  expect(handovers: Record<string, PaneHandover>) {
+    for (const [paneId, h] of Object.entries(handovers)) this.#incoming.set(paneId, h);
   }
 
   register(terminalId: string, s: TermSession) {

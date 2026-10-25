@@ -24,6 +24,9 @@
 // Session restore (stores/session.svelte.ts) brings tabs back *dormant*:
 // views skip connecting / starting shells until the tab is first shown
 // (`wake`), unless the user chose to reconnect everything on launch.
+//
+// Tabs move between windows with their ids (stores/windows.svelte.ts):
+// closed in one window, `insert`ed in the other.
 
 import type { PaneNode } from "../terminal/layout";
 import type { HostId } from "../types";
@@ -200,6 +203,29 @@ class Tabs {
     }
     if (activate) this.activate(tab.id);
     return tab;
+  }
+
+  /**
+   * Adds a tab moved here from another window, keeping its id, and shows it:
+   * in `group` (default: the focused one) at `index` (default: after its
+   * active tab). A host overview or forwards view already open here is
+   * moved there and shown instead. Returns the tab shown.
+   */
+  insert(tab: Tab, { dormant = false, group, index }: { dormant?: boolean; group?: Placement; index?: number } = {}): Tab {
+    const open = SINGLETON.has(tab.kind) && this.list.find((t) => t.kind === tab.kind && t.hostId === tab.hostId);
+    if (open) {
+      if (group !== undefined && index !== undefined) this.move(open.id, index, group);
+      else if (group !== undefined) this.moveToGroup(open.id, group);
+      this.activate(open.id);
+      return open;
+    }
+    const g = this.group(group === undefined ? this.focusedGroup : this.#resolve(group)) ?? this.groups[0];
+    this.list = [...this.list, tab];
+    const at = index ?? (g.activeId ? g.tabIds.indexOf(g.activeId) + 1 : g.tabIds.length);
+    g.tabIds.splice(Math.max(0, Math.min(at, g.tabIds.length)), 0, tab.id);
+    if (dormant) this.dormant[tab.id] = true;
+    this.activate(tab.id);
+    return this.get(tab.id) ?? tab;
   }
 
   /** Group id for a placement, creating a group if needed. */

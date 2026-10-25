@@ -7,6 +7,7 @@ import type {
   ConnectionState,
   CoreEvent,
   DirListing,
+  DraggedTab,
   DragOut,
   EditSession,
   FileEntry,
@@ -19,12 +20,18 @@ import type {
   PortForwardDraft,
   PortForwardStatus,
   PromptResponse,
+  ScreenPoint,
   Snippet,
   SnippetDraft,
+  TabDragIn,
+  TabDragOver,
   TerminalInfo,
   TerminalSpec,
   TransferInfo,
   TransferRequest,
+  WindowInfo,
+  WindowSession,
+  WindowsInfo,
 } from "./types";
 
 export type Unlisten = () => void;
@@ -144,6 +151,15 @@ export interface Backend {
   terminalAck(id: string, bytes: number): Promise<void>;
   /** Close the shell (no-op if already exited). */
   terminalClose(id: string): Promise<void>;
+  /**
+   * Moving a terminal to another window (`windowMoveTab`): stops its output
+   * to this window and returns how many bytes were sent here, so the screen
+   * can be serialized once they have arrived. `terminalResume` undoes it.
+   */
+  terminalDetach(id: string): Promise<number>;
+  terminalResume(id: string): Promise<void>;
+  /** Takes over a terminal moved to this window; its output continues on `onData`. */
+  terminalAttach(id: string, onData: (data: Uint8Array) => void): Promise<void>;
 
   // Snippets (saved commands), persisted by the backend.
   snippetsList(): Promise<Snippet[]>;
@@ -165,7 +181,56 @@ export interface Backend {
   // Backend settings.
   settingsGet(): Promise<AppSettings>;
   settingsSet(settings: AppSettings): Promise<AppSettings>;
+
+  // Windows (src-tauri/src/window.rs). Every window has its own tabs; calls
+  // and events below are about the calling window.
+  /** Opens another, empty window next to this one. */
+  windowOpen(): Promise<void>;
+  /** Closes this window although shells are running in it (after `onCloseRequested`). */
+  windowClose(): Promise<void>;
+  windowInfo(): Promise<WindowInfo>;
+  /** The tabs saved for this window, and whether its sidebar is hidden. */
+  windowSession(): Promise<WindowSession>;
+  /** Saves this window's tabs and whether its sidebar is hidden, and whether tabs are restored at launch at all. */
+  windowSaveSession(session: unknown, sidebarHidden: boolean, restoreTabs: boolean): Promise<void>;
+  /** Unanswered prompts for this window (it reloaded, or they came before it listened). */
+  windowPrompts(): Promise<PromptPayload[]>;
+  /**
+   * Moves a tab to window `to`, or to a new window (with its tab strip at
+   * screen point `at`, else next to this one). `tab` is handed to the target
+   * as is (`windowTakeTabs`); `terminals` (detached first) go with it. On
+   * error this window keeps them. Resolves to the target's label.
+   */
+  windowMoveTab(tab: unknown, terminals: string[], to: string | null, at: ScreenPoint | null): Promise<string>;
+  /** Tabs moved to this window since it last asked. */
+  windowTakeTabs(): Promise<unknown[]>;
+  /** Tabs were moved to this window: take them with `windowTakeTabs`. */
+  onTabsIncoming(handler: () => void): Promise<Unlisten>;
+  /** How this window is listed in the others (its active tab's title, tab count). */
+  windowDescribe(title: string | null, tabs: number): Promise<void>;
+  /** The OS title of this window. */
+  windowSetTitle(title: string): Promise<void>;
+  /**
+   * A tab dragged out of this window is at screen point `at` (null: the drag
+   * ended or came back): shows it to the Patchbay window under the pointer
+   * (`onTabDragOver` there) and clears it from the one it left. Resolves to
+   * that window and the point in its viewport, or null over none.
+   */
+  windowDragTab(tab: DraggedTab | null, at: ScreenPoint | null): Promise<TabDragOver | null>;
+  /** A tab of another window is dragged over this one (null: it left, or was dropped or cancelled). */
+  onTabDragOver(handler: (drag: TabDragIn | null) => void): Promise<Unlisten>;
+  /** Hands window-local state (display settings, file clipboard) to the other windows. */
+  share(topic: string, value: unknown): Promise<void>;
+  /** The latest value shared under `topic`, if any. */
+  shared(topic: string): Promise<unknown>;
+  /** Another window shared something. */
+  onShared(handler: (topic: string, value: unknown) => void): Promise<Unlisten>;
+  onWindowsChanged(handler: (info: WindowsInfo) => void): Promise<Unlisten>;
+  /** The user closed this window while shells run in it: confirm, then `windowClose`. */
+  onCloseRequested(handler: () => void): Promise<Unlisten>;
+
   onCoreEvent(handler: (event: CoreEvent) => void): Promise<Unlisten>;
+  /** Prompts for this window (each goes to one window). */
   onPrompt(handler: (prompt: PromptPayload) => void): Promise<Unlisten>;
   /** The backend abandoned a pending prompt (attempt aborted); dismiss it. */
   onPromptClosed(handler: (id: string) => void): Promise<Unlisten>;
@@ -176,6 +241,9 @@ export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 async function tauriBackend(): Promise<Backend> {
   const { invoke, Channel } = await import("@tauri-apps/api/core");
   const { listen } = await import("@tauri-apps/api/event");
+  // Events sent to this window only (`emit_to`); `listen` would also catch
+  // those sent to the others.
+  const own = (await import("@tauri-apps/api/webviewWindow")).getCurrentWebviewWindow();
   return {
     listHosts: () => invoke("list_hosts"),
     hostWarnings: () => invoke("host_warnings"),
@@ -243,6 +311,13 @@ async function tauriBackend(): Promise<Backend> {
     terminalResize: (id, cols, rows) => invoke("terminal_resize", { id, cols, rows }),
     terminalAck: (id, bytes) => invoke("terminal_ack", { id, bytes }),
     terminalClose: (id) => invoke("terminal_close", { id }),
+    terminalDetach: (id) => invoke("terminal_detach", { id }),
+    terminalResume: (id) => invoke("terminal_resume", { id }),
+    terminalAttach: async (id, onData) => {
+      const channel = new Channel<ArrayBuffer>();
+      channel.onmessage = (chunk) => onData(new Uint8Array(chunk));
+      return invoke("terminal_attach", { id, onData: channel });
+    },
     snippetsList: () => invoke("snippets_list"),
     snippetCreate: (draft) => invoke("snippet_create", { draft }),
     snippetUpdate: (id, draft) => invoke("snippet_update", { id, draft }),
@@ -256,8 +331,29 @@ async function tauriBackend(): Promise<Backend> {
     forwardStop: (id) => invoke("forward_stop", { id }),
     settingsGet: () => invoke("settings_get"),
     settingsSet: (settings) => invoke("settings_set", { settings }),
+    windowOpen: () => invoke("window_open"),
+    windowClose: () => invoke("window_close"),
+    windowInfo: () => invoke("window_info"),
+    windowSession: () => invoke("window_session"),
+    windowSaveSession: (session, sidebarHidden, restoreTabs) => invoke("window_save_session", { session, sidebarHidden, restoreTabs }),
+    windowPrompts: () => invoke("window_prompts"),
+    windowMoveTab: (tab, terminals, to, at) => invoke("window_move_tab", { tab, terminals, to, at }),
+    windowTakeTabs: () => invoke("window_take_tabs"),
+    onTabsIncoming: (handler) => own.listen("tabs-incoming", () => handler()),
+    windowDescribe: (title, tabs) => invoke("window_describe", { title, tabs }),
+    windowSetTitle: (title) => own.setTitle(title),
+    windowDragTab: (tab, at) => invoke("window_drag_tab", { tab, at }),
+    onTabDragOver: (handler) => own.listen<TabDragIn | null>("tab-drag-over", (e) => handler(e.payload)),
+    share: (topic, value) => invoke("ui_share", { topic, value }),
+    shared: (topic) => invoke("ui_shared", { topic }),
+    onShared: (handler) =>
+      listen<{ topic: string; value: unknown; from: string }>("ui-shared", (e) => {
+        if (e.payload.from !== own.label) handler(e.payload.topic, e.payload.value);
+      }),
+    onWindowsChanged: (handler) => listen<WindowsInfo>("windows-changed", (e) => handler(e.payload)),
+    onCloseRequested: (handler) => own.listen("window-close-requested", () => handler()),
     onCoreEvent: (handler) => listen<CoreEvent>("core-event", (e) => handler(e.payload)),
-    onPrompt: (handler) => listen<PromptPayload>("prompt", (e) => handler(e.payload)),
+    onPrompt: (handler) => own.listen<PromptPayload>("prompt", (e) => handler(e.payload)),
     onPromptClosed: (handler) =>
       listen<{ id: string }>("prompt-closed", (e) => handler(e.payload.id)),
   };

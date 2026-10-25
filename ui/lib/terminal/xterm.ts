@@ -1,7 +1,7 @@
 // Lazy loading of xterm.js and its addons (kept out of the initial bundle),
 // plus the terminal color themes derived from the app's design tokens.
 
-import type { ITheme } from "@xterm/xterm";
+import type { ITheme, Terminal } from "@xterm/xterm";
 
 export type XtermModules = Awaited<ReturnType<typeof importAll>>;
 
@@ -65,6 +65,23 @@ export async function loadWebgl(): Promise<typeof import("@xterm/addon-webgl").W
     return (await webgl).WebglAddon;
   } catch {
     return null;
+  }
+}
+
+let serialize: Promise<typeof import("@xterm/addon-serialize")> | undefined;
+
+/** Serializes a terminal's screen and scrollback as the escape sequences that recreate them (moving it to another window). */
+export async function serializeTerminal(term: Terminal): Promise<string> {
+  serialize ??= import("@xterm/addon-serialize").catch((e) => {
+    serialize = undefined;
+    throw e;
+  });
+  const addon = new (await serialize).SerializeAddon();
+  term.loadAddon(addon);
+  try {
+    return addon.serialize();
+  } finally {
+    addon.dispose();
   }
 }
 

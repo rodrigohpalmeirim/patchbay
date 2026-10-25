@@ -2,6 +2,7 @@
 <script lang="ts">
   import Plus from "@lucide/svelte/icons/plus";
   import Laptop from "@lucide/svelte/icons/laptop";
+  import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
   import { newHost } from "../actions";
   import { openFiles } from "../files/ops";
   import Logo from "../components/Logo.svelte";
@@ -15,6 +16,11 @@
 </script>
 
 <div class="welcome">
+  {#if !ui.sidebarOpen}
+    <button type="button" class="icon-btn show-sidebar" aria-label="Show sidebar" title="Show sidebar ({modKey}+B)" onclick={() => ui.toggleSidebar(true)}>
+      <PanelLeftOpen size={15} />
+    </button>
+  {/if}
   <div class="inner">
     <Logo size={56} />
     <h1>Welcome to Patchbay</h1>
@@ -41,6 +47,7 @@
       <div><dt>Open selected host</dt><dd><kbd>Enter</kbd></dd></div>
       <div><dt>New host</dt><dd><kbd>{modKey}</kbd><kbd>N</kbd></dd></div>
       <div><dt>Port forwards</dt><dd><kbd>{modKey}</kbd><kbd>Shift</kbd><kbd>P</kbd></dd></div>
+      <div><dt>Show or hide the sidebar</dt><dd><kbd>{modKey}</kbd><kbd>B</kbd></dd></div>
       <div>
         <dt><button class="linkish" onclick={() => (ui.settingsOpen = true)}>Settings</button></dt>
         <dd><kbd>{modKey}</kbd><kbd>,</kbd></dd>
@@ -51,11 +58,18 @@
 
 <style>
   .welcome {
+    position: relative;
     display: grid;
     place-items: center;
     height: 100%;
     overflow-y: auto;
     padding: 32px;
+  }
+  /* Where the tab strip has it. */
+  .show-sidebar {
+    position: absolute;
+    top: 8px;
+    left: 8px;
   }
   .inner {
     display: flex;

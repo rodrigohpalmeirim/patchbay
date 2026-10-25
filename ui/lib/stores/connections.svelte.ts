@@ -8,6 +8,7 @@ import { prompts } from "./prompts.svelte";
 import { tabs } from "./tabs.svelte";
 import { toasts } from "./toasts.svelte";
 import { ui } from "./ui.svelte";
+import { windows } from "./windows.svelte";
 
 export type Phase =
   | "idle"
@@ -148,7 +149,8 @@ class Connections {
     const c = this.#ensure(id);
     c.banner = c.banner ? `${c.banner}\n${message}` : message;
     const url = firstUrl(message);
-    if (!url) return;
+    // Every window gets the banner; the one last used shows the link.
+    if (!url || !windows.active) return;
     this.#dismissBanner(id);
     const name = hosts.get(id)?.name ?? id;
     const toast = toasts.show("info", `${name} needs your approval`, message, {
@@ -243,7 +245,7 @@ class Connections {
           // the user if nothing picks the connection up again.
           const reason = ev.reason;
           setTimeout(() => {
-            if (this.get(id).phase === "idle" && !tabs.isHostVisible(id)) {
+            if (this.get(id).phase === "idle" && windows.active && !tabs.isHostVisible(id)) {
               toasts.show("info", `Disconnected from ${hosts.get(id)?.name ?? id}`, reason);
             }
           }, 1500);

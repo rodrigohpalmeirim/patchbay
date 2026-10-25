@@ -237,7 +237,7 @@ export async function drop(drag: FileDrag) {
 
 export function copyToClipboard(b: FileBrowser, entries: FileEntry[]) {
   if (!entries.length) return;
-  files.clipboard = { hostId: b.hostId, entries: entries.map((e) => ({ ...e })) };
+  files.setClipboard({ hostId: b.hostId, entries: entries.map((e) => ({ ...e })) });
   toasts.info(`Copied ${describe(entries)}`, `Paste into any files tab with ${modKey}+V to copy them there.`);
 }
 

@@ -16,7 +16,7 @@ use patchbay_core::tailscale;
 use patchbay_core::terminal::TerminalManager;
 use patchbay_core::transfer::TransferManager;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, WebviewWindow};
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
@@ -41,7 +41,35 @@ pub struct AppState {
     pub quitting: AtomicBool,
     /// The tailnet has been read at least once (see `ensure_tailnet`).
     tailnet_checked: AtomicBool,
-    pending_prompts: Mutex<HashMap<Uuid, oneshot::Sender<PromptResponse>>>,
+    pending_prompts: Mutex<HashMap<Uuid, PendingPrompt>>,
+    /// The window that last asked for each connection, transfer and edit
+    /// session, so their prompts go there.
+    origins: Mutex<HashMap<Origin, String>>,
+}
+
+/// What a prompt is about, as far as choosing its window goes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Origin {
+    Host(HostId),
+    Transfer(Uuid),
+    Edit(Uuid),
+}
+
+impl Origin {
+    fn of(payload: &PromptPayload) -> Option<Self> {
+        match &payload.prompt {
+            Prompt::FileConflict { transfer_id, .. } => Some(Self::Transfer(*transfer_id)),
+            Prompt::EditConflict { session_id, .. } => Some(Self::Edit(*session_id)),
+            _ => payload.host_id.clone().map(Self::Host),
+        }
+    }
+}
+
+struct PendingPrompt {
+    answer: oneshot::Sender<PromptResponse>,
+    payload: PromptPayload,
+    /// The window showing it; `None` while no window is open.
+    window: Option<String>,
 }
 
 /// A prompt as delivered to the frontend; answered via `respond_prompt`.
@@ -117,6 +145,7 @@ impl AppState {
             quitting: AtomicBool::new(false),
             tailnet_checked: AtomicBool::new(false),
             pending_prompts: Mutex::new(HashMap::new()),
+            origins: Mutex::new(HashMap::new()),
         };
         Ok((state, events_rx, prompts_rx))
     }
@@ -129,9 +158,41 @@ impl AppState {
         self.settings().get()
     }
 
-    /// Hands a core prompt to the frontend (`prompt` event). If the core
+    /// Prompts about `origin` go to `window` from now on.
+    pub fn set_origin(&self, origin: Origin, window: &str) {
+        self.origins
+            .lock()
+            .unwrap()
+            .insert(origin, window.to_owned());
+    }
+
+    /// The window for a prompt: the one that asked for what it is about if
+    /// that is still open, otherwise the most recently focused one.
+    fn prompt_window(&self, app: &AppHandle, payload: &PromptPayload) -> Option<WebviewWindow> {
+        let origin =
+            Origin::of(payload).and_then(|o| self.origins.lock().unwrap().get(&o).cloned());
+        let windows = app.state::<crate::window::Windows>();
+        let open = windows.preferred_labels();
+        origin
+            .filter(|l| open.contains(l))
+            .and_then(|l| app.get_webview_window(&l))
+            .or_else(|| crate::window::preferred(app))
+    }
+
+    /// Shows a prompt in `window` (`prompt` event), bringing the window back
+    /// from the tray: the answer needs the user.
+    fn deliver(app: &AppHandle, window: &WebviewWindow, payload: &PromptPayload) {
+        crate::window::reveal_window(window);
+        let _ = app.emit_to(
+            EventTarget::webview_window(window.label()),
+            "prompt",
+            payload.clone(),
+        );
+    }
+
+    /// Hands a core prompt to one window (see `prompt_window`). If the core
     /// abandons it before the user answers (connection aborted, timeout), a
-    /// `prompt-closed` event tells the frontend to dismiss the dialog.
+    /// `prompt-closed` event tells every window to dismiss it.
     pub fn present_prompt(&self, app: &AppHandle, request: PromptRequest) {
         let PromptRequest {
             id,
@@ -139,8 +200,21 @@ impl AppState {
             prompt,
             mut reply,
         } = request;
+        let payload = PromptPayload {
+            id,
+            host_id,
+            prompt,
+        };
         let (answer_tx, answer_rx) = oneshot::channel();
-        self.pending_prompts.lock().unwrap().insert(id, answer_tx);
+        let window = self.prompt_window(app, &payload);
+        self.pending_prompts.lock().unwrap().insert(
+            id,
+            PendingPrompt {
+                answer: answer_tx,
+                payload: payload.clone(),
+                window: window.as_ref().map(|w| w.label().to_owned()),
+            },
+        );
 
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -157,31 +231,64 @@ impl AppState {
             }
         });
 
-        // The answer needs the user: bring the window back from the tray.
-        crate::window::reveal(app);
-        let _ = app.emit(
-            "prompt",
-            PromptPayload {
-                id,
-                host_id,
-                prompt,
-            },
-        );
+        tracing::debug!(%id, window = ?window.as_ref().map(|w| w.label()), "presenting prompt");
+        if let Some(window) = window {
+            Self::deliver(app, &window, &payload);
+        }
     }
 
     /// Returns false if the prompt is unknown (already answered or abandoned).
     pub fn answer_prompt(&self, id: Uuid, response: PromptResponse) -> bool {
-        let answer = self.pending_prompts.lock().unwrap().remove(&id);
-        match answer {
-            Some(answer) => answer.send(response).is_ok(),
+        let pending = self.pending_prompts.lock().unwrap().remove(&id);
+        match pending {
+            Some(pending) => pending.answer.send(response).is_ok(),
             None => false,
         }
     }
 
+    /// Unanswered prompts for `window`, e.g. after it reloaded or before its
+    /// page listened. Prompts no window shows yet are given to it.
+    pub fn window_prompts(&self, window: &str) -> Vec<PromptPayload> {
+        let mut pending = self.pending_prompts.lock().unwrap();
+        pending
+            .values_mut()
+            .filter(|p| p.window.as_deref().is_none_or(|w| w == window))
+            .map(|p| {
+                p.window = Some(window.to_owned());
+                p.payload.clone()
+            })
+            .collect()
+    }
+
+    /// `window` closed: its prompts move to another window, and what it
+    /// asked for no longer leads there.
+    pub fn window_closed(&self, app: &AppHandle, window: &str) {
+        self.origins.lock().unwrap().retain(|_, w| w != window);
+        let target = crate::window::preferred(app).filter(|w| w.label() != window);
+        let moved: Vec<PromptPayload> = {
+            let mut pending = self.pending_prompts.lock().unwrap();
+            pending
+                .values_mut()
+                .filter(|p| p.window.as_deref() == Some(window))
+                .map(|p| {
+                    p.window = target.as_ref().map(|w| w.label().to_owned());
+                    p.payload.clone()
+                })
+                .collect()
+        };
+        if let Some(target) = target {
+            for payload in &moved {
+                tracing::debug!(id = %payload.id, from = window, to = target.label(), "moving prompt");
+                Self::deliver(app, &target, payload);
+            }
+        }
+    }
+
     /// Closes the terminals whose output goes to `webview` (it is reloading
-    /// or gone, so nobody can see them anymore).
-    pub fn close_webview_terminals(&self, webview: &str) {
-        for id in self.streams.cancel_webview(webview) {
+    /// or gone, so nobody can see them anymore). Terminals being handed to
+    /// it are only closed when it is `gone` (see `crate::streams`).
+    pub fn close_webview_terminals(&self, webview: &str, gone: bool) {
+        for id in self.streams.cancel_webview(webview, gone) {
             tracing::debug!(%id, webview, "closing terminal of a reloaded/closed webview");
             let terminals = self.terminals.clone();
             tauri::async_runtime::spawn(async move { terminals.close(id).await });

@@ -9,6 +9,7 @@ import { basename, dirname } from "../util/paths";
 import { attempt } from "./backend";
 import { files } from "./files.svelte";
 import { toasts } from "./toasts.svelte";
+import { windows } from "./windows.svelte";
 import { transfers } from "./transfers.svelte";
 import { ui } from "./ui.svelte";
 
@@ -46,10 +47,11 @@ class Edits {
     }
     this.map[s.id] = s;
     if (!prev) return;
+    // Every window gets the event; the one last used tells the user.
     if (s.lastUpload !== prev.lastUpload && s.lastUpload != null) {
       files.refreshDir(s.hostId, dirname(s.remotePath) ?? "/");
-      if (prev.lastUpload == null) toasts.success(`Saved ${editName(s)} to ${machineName(s.hostId)}`, "Later saves upload automatically.");
-    } else if (s.state === "failed" && prev.state !== "failed" && !s.recovered) {
+      if (prev.lastUpload == null && windows.active) toasts.success(`Saved ${editName(s)} to ${machineName(s.hostId)}`, "Later saves upload automatically.");
+    } else if (s.state === "failed" && prev.state !== "failed" && !s.recovered && windows.active) {
       toasts.show(
         "error",
         `Couldn't save ${editName(s)} to ${machineName(s.hostId)}`,

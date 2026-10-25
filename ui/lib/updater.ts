@@ -1,5 +1,6 @@
 // Checks GitHub releases for a newer signed build (Tauri updater) in
-// production desktop builds and offers to install it.
+// production desktop builds and offers to install it. Runs in one window
+// only (the leader, see stores/windows.svelte.ts).
 
 import { isTauri } from "./api";
 import { toasts } from "./stores/toasts.svelte";
@@ -8,6 +9,7 @@ const FIRST_CHECK_DELAY = 15_000;
 const CHECK_INTERVAL = 6 * 60 * 60 * 1000;
 
 let offered: string | null = null;
+let started = false;
 
 async function checkOnce() {
   const { check } = await import("@tauri-apps/plugin-updater");
@@ -35,9 +37,10 @@ async function install(update: import("@tauri-apps/plugin-updater").Update) {
   }
 }
 
-/** Starts periodic update checks (desktop production builds only). */
+/** Starts periodic update checks (desktop production builds only). Runs once per window. */
 export function startUpdateChecks() {
-  if (!isTauri || import.meta.env.DEV) return;
+  if (started || !isTauri || import.meta.env.DEV) return;
+  started = true;
   const run = () =>
     checkOnce().catch((e) => {
       // No releases yet, offline, or no endpoint configured: not worth a toast.

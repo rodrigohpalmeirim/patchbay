@@ -10,6 +10,7 @@ mod search;
 mod settings;
 mod terminals;
 mod transfers;
+mod windows;
 
 pub use dragout::*;
 pub use edit::*;
@@ -20,3 +21,4 @@ pub use search::*;
 pub use settings::*;
 pub use terminals::*;
 pub use transfers::*;
+pub use windows::*;

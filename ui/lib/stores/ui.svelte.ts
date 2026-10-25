@@ -1,4 +1,5 @@
-// Transient UI state: which dialogs/menus are open.
+// Transient UI state: which dialogs/menus are open, and whether this window
+// shows the hosts sidebar (saved with the window, stores/session.svelte.ts).
 
 import type { LucideIcon } from "@lucide/svelte";
 import type { FileEntry, HostDraft, HostId, PortForwardDraft } from "../types";
@@ -8,16 +9,28 @@ export type EditorState =
   | { mode: "edit"; hostId: HostId }
   | { mode: "view"; hostId: HostId };
 
-export type MenuItem =
-  | {
-      label: string;
-      icon?: LucideIcon;
-      onSelect: () => void;
-      danger?: boolean;
-      disabled?: boolean;
-      hint?: string;
-    }
-  | { separator: true };
+export interface MenuAction {
+  label: string;
+  icon?: LucideIcon;
+  onSelect: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+  hint?: string;
+}
+
+export interface MenuSeparator {
+  separator: true;
+}
+
+/** Opens a submenu (one level). */
+export interface MenuParent {
+  label: string;
+  icon?: LucideIcon;
+  submenu: (MenuAction | MenuSeparator)[];
+  disabled?: boolean;
+}
+
+export type MenuItem = MenuAction | MenuParent | MenuSeparator;
 
 export interface MenuState {
   items: MenuItem[];
@@ -78,8 +91,14 @@ class Ui {
   snippets = $state<SnippetsDialogState | null>(null);
   forwardEditor = $state<ForwardEditorState | null>(null);
   connectAs = $state<ConnectAsState | null>(null);
-  /** Registered by the sidebar so global shortcuts can focus the search box. */
+  sidebarOpen = $state(true);
+  /** Registered by the sidebar so global shortcuts can focus the search box (showing the sidebar). */
   focusSearch: () => void = () => {};
+
+  /** Shows or hides the hosts sidebar (Mod+B). */
+  toggleSidebar(open = !this.sidebarOpen) {
+    this.sidebarOpen = open;
+  }
 
   openMenu(label: string, items: MenuItem[], at: { x: number; y: number } | HTMLElement) {
     const returnFocus =

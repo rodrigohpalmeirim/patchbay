@@ -3,11 +3,11 @@
 use std::collections::{BTreeMap, HashMap};
 
 use patchbay_core::model::{ConnectionState, CoreEvent, Host, HostDraft, HostId, PromptResponse};
-use tauri::State;
+use tauri::{State, Webview};
 use uuid::Uuid;
 
 use crate::error::{CommandError, CommandResult};
-use crate::state::AppState;
+use crate::state::{AppState, Origin};
 
 #[tauri::command]
 pub async fn list_hosts(state: State<'_, AppState>) -> CommandResult<Vec<Host>> {
@@ -132,13 +132,16 @@ pub fn list_connections(state: State<'_, AppState>) -> HashMap<HostId, Connectio
 /// failures reject with a `CommandError` and also emit `disconnected`.
 /// `user` overrides the user to log in as (like `ssh -l`). For Tailscale
 /// devices, the user of a successful login is remembered; without one,
-/// connecting fails with `userRequired`.
+/// connecting fails with `userRequired`. Prompts of the attempt go to the
+/// calling window.
 #[tauri::command]
 pub async fn connect(
     state: State<'_, AppState>,
+    webview: Webview,
     id: HostId,
     user: Option<String>,
 ) -> CommandResult<()> {
+    state.set_origin(Origin::Host(id.clone()), webview.label());
     let user = user.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
     let target = state
         .hosts

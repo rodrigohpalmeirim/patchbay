@@ -136,15 +136,16 @@ pub fn run() {
             if payload.event() == PageLoadEvent::Started
                 && let Some(state) = webview.try_state::<AppState>()
             {
-                state.close_webview_terminals(webview.label());
+                state.close_webview_terminals(webview.label(), false);
             }
-            if payload.event() == PageLoadEvent::Finished && webview.label() == window::MAIN {
-                window::ready(webview.app_handle());
+            if payload.event() == PageLoadEvent::Finished {
+                window::page_loaded(webview.app_handle(), webview.label());
             }
         })
         .on_window_event(|window, event| match event {
             // Pick up edits to ~/.ssh/config made while the app was in the background.
             WindowEvent::Focused(true) => {
+                window::focused(window);
                 let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(err) = app.state::<AppState>().refresh_hosts().await {
@@ -152,23 +153,16 @@ pub fn run() {
                     }
                 });
             }
-            // Close to tray: keep sessions, terminals and forwards running.
-            WindowEvent::CloseRequested { api, .. } if window.label() == window::MAIN => {
-                if let Some(state) = window.try_state::<AppState>()
-                    && !state.quitting.load(Ordering::SeqCst)
-                    && state.current_settings().close_to_tray
-                {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
-            }
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) => window::track(window),
+            WindowEvent::CloseRequested { api, .. } => window::close_requested(window, api),
             WindowEvent::Destroyed => {
                 if let Some(state) = window.try_state::<AppState>() {
                     for webview in window.webviews() {
-                        state.close_webview_terminals(webview.label());
+                        state.close_webview_terminals(webview.label(), true);
                     }
-                    state.close_webview_terminals(window.label());
+                    state.close_webview_terminals(window.label(), true);
                 }
+                window::destroyed(window);
             }
             _ => {}
         })
@@ -219,6 +213,9 @@ pub fn run() {
             commands::terminal_write,
             commands::terminal_resize,
             commands::terminal_close,
+            commands::terminal_detach,
+            commands::terminal_resume,
+            commands::terminal_attach,
             commands::terminal_ack,
             commands::snippets_list,
             commands::snippet_create,
@@ -233,6 +230,18 @@ pub fn run() {
             commands::forward_stop,
             commands::settings_get,
             commands::settings_set,
+            commands::window_open,
+            commands::window_close,
+            commands::window_info,
+            commands::window_session,
+            commands::window_save_session,
+            commands::window_prompts,
+            commands::window_move_tab,
+            commands::window_take_tabs,
+            commands::window_drag_tab,
+            commands::window_describe,
+            commands::ui_share,
+            commands::ui_shared,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Patchbay")
@@ -240,9 +249,19 @@ pub fn run() {
             // Dock icon clicked while the window is hidden in the tray.
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => window::reveal(app),
-            // Hang up shells, cancel remote forwards and close their SSH
-            // channels before going away.
+            // Windows closing from here on close with the app: keep their
+            // layouts.
+            RunEvent::ExitRequested { .. } => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.quitting.store(true, Ordering::SeqCst);
+                }
+            }
+            // Save the windows, hang up shells, cancel remote forwards and
+            // close their SSH channels before going away.
             RunEvent::Exit => {
+                if let Some(windows) = app.try_state::<window::Windows>() {
+                    windows.flush();
+                }
                 if let Some(state) = app.try_state::<AppState>() {
                     state.dragout.clear();
                     let terminals = state.terminals.clone();
@@ -263,7 +282,8 @@ pub fn run() {
         });
 }
 
-/// Really exit (tray "Quit Patchbay"): closing the window must not hide it.
+/// Really exit (tray "Quit Patchbay"): closing windows must not hide them or
+/// forget their layouts.
 pub(crate) fn quit(app: &AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         state.quitting.store(true, Ordering::SeqCst);

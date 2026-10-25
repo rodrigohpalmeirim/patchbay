@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AppWindow from "@lucide/svelte/icons/app-window";
   import ArrowDown from "@lucide/svelte/icons/arrow-down";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import ArrowRight from "@lucide/svelte/icons/arrow-right";
@@ -7,8 +8,10 @@
   import Copy from "@lucide/svelte/icons/copy";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import Laptop from "@lucide/svelte/icons/laptop";
+  import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
   import Plus from "@lucide/svelte/icons/plus";
   import Rows2 from "@lucide/svelte/icons/rows-2";
+  import SquareArrowOutUpRight from "@lucide/svelte/icons/square-arrow-out-up-right";
   import SquareTerminal from "@lucide/svelte/icons/square-terminal";
   import X from "@lucide/svelte/icons/x";
   import { hostMenuItems } from "../actions";
@@ -21,11 +24,14 @@
   import { hosts } from "../stores/hosts.svelte";
   import { tabs, type Placement, type Tab } from "../stores/tabs.svelte";
   import { ui, type MenuItem } from "../stores/ui.svelte";
+  import { windows } from "../stores/windows.svelte";
+  import { plural } from "../util/format";
   import { modKey } from "../util/platform";
   import { tabDef } from "../views/tabKinds";
   import StatusDot from "./StatusDot.svelte";
 
-  let { group, focused = false }: { group: string; focused?: boolean } = $props();
+  /** `sidebarButton`: the sidebar is hidden and this strip is the top-left one, so it can bring it back. */
+  let { group, focused = false, sidebarButton = false }: { group: string; focused?: boolean; sidebarButton?: boolean } = $props();
 
   let strip = $state<HTMLElement>();
   const list = $derived(tabs.tabsIn(group));
@@ -84,6 +90,20 @@
       const to = near[dir];
       if (to) items.push({ label, icon, onSelect: () => tabs.moveToGroup(tab.id, to) });
     }
+    if (windows.canOpen) {
+      items.push({ label: "Move to new window", icon: SquareArrowOutUpRight, onSelect: () => void windows.moveTab(tab.id, null) });
+      if (windows.others.length) {
+        items.push({
+          label: "Move to window",
+          icon: AppWindow,
+          submenu: windows.others.map((w) => ({
+            label: windows.name(w),
+            hint: plural(w.tabs, "tab"),
+            onSelect: () => void windows.moveTab(tab.id, w.label),
+          })),
+        });
+      }
+    }
     if (tab.kind === "terminal" || tab.kind === "files") {
       const duplicate = (to?: Placement) => (tab.kind === "terminal" ? duplicateTerminalTab(tab, to) : duplicateFilesTab(tab, to));
       items.push({ label: "Duplicate tab", icon: Copy, onSelect: () => duplicate(group) });
@@ -100,7 +120,7 @@
 
   function onpointerdown(e: PointerEvent, tab: Tab) {
     if (e.button !== 0) return;
-    dnd.armTabDrag(e, tab.id);
+    dnd.armTabDrag(e, tab.id, null, tabDef(tab).title(tab, hosts.get(tab.hostId)));
   }
 
   function onclick(tab: Tab) {
@@ -110,7 +130,7 @@
     if (tab.kind === "terminal") terminals.requestFocus(tab.id);
   }
 
-  /** "+" menu: new terminal / files tab for this group's machine, or this computer. */
+  /** "+" menu: new terminal / files tab for this group's machine, or this computer; new window. */
   function newMenu(e: MouseEvent) {
     const activeTab = activeId ? tabs.get(activeId) : undefined;
     const hostId = activeTab?.hostId ?? null;
@@ -134,6 +154,8 @@
     items.push(
       { label: "Local terminal", icon: SquareTerminal, hint: !host && group === tabs.focusedGroup ? NEW_TERMINAL_KEY : undefined, onSelect: () => openTerminal(null, { group }) },
       { label: "Local files", icon: Laptop, onSelect: () => openFiles(null, { group }) },
+      { separator: true },
+      { label: "New window", icon: AppWindow, disabled: !windows.canOpen, onSelect: () => windows.open() },
     );
     ui.openMenu("New tab", items, e.currentTarget as HTMLElement);
   }
@@ -146,73 +168,91 @@
   });
 </script>
 
-<div class="strip" class:focused bind:this={strip} role="tablist" aria-label={tabs.isSplit ? "Tab group" : "Open tabs"} data-strip-group={group}>
-  {#each list as tab (tab.id)}
-    {@const host = hosts.get(tab.hostId)}
-    {@const def = tabDef(tab)}
-    {@const Icon = def.icon(tab)}
-    {@const active = tab.id === activeId}
-    {@const preview = tab.id === previewId}
-    {@const title = def.title(tab, host)}
-    {@const subtitle = def.subtitle?.(tab, host)}
-    <div class="tab" class:active class:preview class:dragging={dnd.tab?.id === tab.id && !dnd.tab.pane} data-tab-wrap>
-      <button
-        type="button"
-        role="tab"
-        class="tab-btn"
-        id="tab-{tab.id}"
-        data-tab-id={tab.id}
-        aria-selected={active}
-        aria-controls="panel-{tab.id}"
-        tabindex={active ? 0 : -1}
-        title={(def.tooltip?.(tab, host) ?? title) + (preview ? " (preview: double-click to keep it open)" : "")}
-        onclick={() => onclick(tab)}
-        ondblclick={() => tabs.pin(tab.id)}
-        onpointerdown={(e) => onpointerdown(e, tab)}
-        onauxclick={(e) => e.button === 1 && tabs.close(tab.id)}
-        onkeydown={(e) => onkeydown(e, tab)}
-        oncontextmenu={(e) => oncontextmenu(e, tab)}
-      >
-        <span class="icon">
-          <Icon size={14} />
-          {#if tab.hostId}
-            <span class="badge-dot"><StatusDot status={connections.status(tab.hostId)} size={6} /></span>
-          {/if}
-        </span>
-        <span class="title">{title}</span>
-        {#if subtitle}<span class="subtitle">{subtitle}</span>{/if}
+<div class="bar" class:focused data-strip-group={group}>
+  {#if sidebarButton}
+    <!-- Outside the scrolling tabs, so they never pass under it. -->
+    <span class="sidebar-slot">
+      <button type="button" class="icon-btn" aria-label="Show sidebar" title="Show sidebar ({modKey}+B)" onclick={() => ui.toggleSidebar(true)}>
+        <PanelLeftOpen size={15} />
       </button>
-      <button
-        type="button"
-        class="close icon-btn sm"
-        tabindex="-1"
-        aria-label="Close {title}"
-        title="Close ({modKey}+W)"
-        onclick={() => tabs.close(tab.id)}
-      >
-        <X size={13} />
-      </button>
-    </div>
-  {/each}
-  <button type="button" class="new icon-btn" aria-label="New tab" aria-haspopup="menu" title="New terminal or files tab" onclick={newMenu}>
-    <Plus size={15} />
-  </button>
-  <span class="rest" aria-hidden="true"></span>
+    </span>
+  {/if}
+  <div class="strip" class:after-button={sidebarButton} bind:this={strip} role="tablist" aria-label={tabs.isSplit ? "Tab group" : "Open tabs"}>
+    {#each list as tab (tab.id)}
+      {@const host = hosts.get(tab.hostId)}
+      {@const def = tabDef(tab)}
+      {@const Icon = def.icon(tab)}
+      {@const active = tab.id === activeId}
+      {@const preview = tab.id === previewId}
+      {@const title = def.title(tab, host)}
+      {@const subtitle = def.subtitle?.(tab, host)}
+      <div class="tab" class:active class:preview class:dragging={dnd.tab?.id === tab.id && !dnd.tab.pane} data-tab-wrap>
+        <button
+          type="button"
+          role="tab"
+          class="tab-btn"
+          id="tab-{tab.id}"
+          data-tab-id={tab.id}
+          aria-selected={active}
+          aria-controls="panel-{tab.id}"
+          tabindex={active ? 0 : -1}
+          title={(def.tooltip?.(tab, host) ?? title) + (preview ? " (preview: double-click to keep it open)" : "")}
+          onclick={() => onclick(tab)}
+          ondblclick={() => tabs.pin(tab.id)}
+          onpointerdown={(e) => onpointerdown(e, tab)}
+          onauxclick={(e) => e.button === 1 && tabs.close(tab.id)}
+          onkeydown={(e) => onkeydown(e, tab)}
+          oncontextmenu={(e) => oncontextmenu(e, tab)}
+        >
+          <span class="icon">
+            <Icon size={14} />
+            {#if tab.hostId}
+              <span class="badge-dot"><StatusDot status={connections.status(tab.hostId)} size={6} /></span>
+            {/if}
+          </span>
+          <span class="title">{title}</span>
+          {#if subtitle}<span class="subtitle">{subtitle}</span>{/if}
+        </button>
+        <button
+          type="button"
+          class="close icon-btn sm"
+          tabindex="-1"
+          aria-label="Close {title}"
+          title="Close ({modKey}+W)"
+          onclick={() => tabs.close(tab.id)}
+        >
+          <X size={13} />
+        </button>
+      </div>
+    {/each}
+    <button type="button" class="new icon-btn" aria-label="New tab" aria-haspopup="menu" title="New terminal or files tab" onclick={newMenu}>
+      <Plus size={15} />
+    </button>
+    <span class="rest" aria-hidden="true"></span>
+  </div>
 </div>
 
 <style>
+  .bar {
+    display: flex;
+    height: var(--tabstrip-h);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-sidebar);
+    flex: none;
+  }
   .strip {
     display: flex;
+    flex: 1;
     align-items: flex-end;
     gap: 2px;
-    height: var(--tabstrip-h);
+    min-width: 0;
     padding: 0 8px;
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-sidebar);
-    flex: none;
+  }
+  .strip.after-button {
+    padding-left: 0;
   }
   .strip::-webkit-scrollbar {
     display: none;
@@ -220,6 +260,13 @@
   .rest {
     flex: 1;
     align-self: stretch;
+  }
+  /* Lined up with the "+" button; the tabs start (and scroll out of view) 6px to its right. */
+  .sidebar-slot {
+    display: flex;
+    align-items: center;
+    flex: none;
+    padding: 2px 6px 0 8px;
   }
   .new {
     flex: none;

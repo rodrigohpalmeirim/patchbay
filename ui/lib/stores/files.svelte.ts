@@ -15,8 +15,14 @@ export type SortKey = "name" | "size" | "modified" | "permissions" | "owner";
 export type SortDir = "asc" | "desc";
 
 // ------------------------------------------------------------------ prefs
+//
+// Persisted in localStorage and handed to the other windows as they change;
+// whether the preview and transfer panels are open stays per window.
 
 const PREFS_KEY = "patchbay.files.v1";
+/** Topics for sharing with the other windows. */
+export const PREFS_TOPIC = "filePrefs";
+export const CLIPBOARD_TOPIC = "fileClipboard";
 
 interface Prefs {
   showHidden: boolean;
@@ -47,6 +53,9 @@ function loadPrefs(): Prefs {
   }
 }
 
+const SORT_KEYS: readonly SortKey[] = ["name", "size", "modified", "permissions", "owner"];
+const num = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+
 class FilePrefs {
   #p = loadPrefs();
   showHidden = $state(this.#p.showHidden);
@@ -58,20 +67,31 @@ class FilePrefs {
   transfersHeight = $state(this.#p.transfersHeight);
 
   save() {
+    const data: Prefs = {
+      showHidden: this.showHidden,
+      sortKey: this.sortKey,
+      sortDir: this.sortDir,
+      previewOpen: this.previewOpen,
+      previewWidth: this.previewWidth,
+      transfersOpen: this.transfersOpen,
+      transfersHeight: this.transfersHeight,
+    };
     try {
-      const data: Prefs = {
-        showHidden: this.showHidden,
-        sortKey: this.sortKey,
-        sortDir: this.sortDir,
-        previewOpen: this.previewOpen,
-        previewWidth: this.previewWidth,
-        transfersOpen: this.transfersOpen,
-        transfersHeight: this.transfersHeight,
-      };
       localStorage.setItem(PREFS_KEY, JSON.stringify(data));
     } catch {
       // Not persisted; fine.
     }
+    void attempt((b) => b.share(PREFS_TOPIC, data), { toast: false });
+  }
+
+  /** Takes over prefs changed (and already saved) in another window. */
+  adopt(raw: unknown) {
+    const p = (raw && typeof raw === "object" ? raw : {}) as Partial<Record<keyof Prefs, unknown>>;
+    if (typeof p.showHidden === "boolean") this.showHidden = p.showHidden;
+    if (SORT_KEYS.includes(p.sortKey as SortKey)) this.sortKey = p.sortKey as SortKey;
+    if (p.sortDir === "asc" || p.sortDir === "desc") this.sortDir = p.sortDir;
+    this.previewWidth = num(p.previewWidth, this.previewWidth);
+    this.transfersHeight = num(p.transfersHeight, this.transfersHeight);
   }
 }
 
@@ -448,8 +468,20 @@ export interface Clip {
 
 class Files {
   #browsers = new Map<string, FileBrowser>();
-  /** Copied entries (Ctrl/Cmd+C) waiting to be pasted into a pane. */
+  /** Copied entries (Ctrl/Cmd+C) waiting to be pasted into a pane, in any window. */
   clipboard = $state.raw<Clip | null>(null);
+
+  setClipboard(clip: Clip | null) {
+    this.clipboard = clip;
+    void attempt((b) => b.share(CLIPBOARD_TOPIC, clip), { toast: false });
+  }
+
+  /** Takes over what was copied in another window. */
+  adoptClipboard(raw: unknown) {
+    const c = raw as Partial<Clip> | null;
+    const valid = !!c && (c.hostId === null || typeof c.hostId === "string") && Array.isArray(c.entries);
+    this.clipboard = valid ? { hostId: c.hostId ?? null, entries: c.entries ?? [] } : null;
+  }
 
   ensure(tab: FilesTab): FileBrowser {
     let b = this.#browsers.get(tab.id);

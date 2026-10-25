@@ -5,7 +5,7 @@
 //! [`transfer::TransferManager`], [`search::SearchManager`],
 //! [`terminal::TerminalManager`], [`forward::ForwardManager`],
 //! [`edit::EditManager`], [`dragout::DragOutCache`] and the
-//! host/snippet/settings stores, and receives
+//! host/snippet/settings/window-layout stores, and receives
 //! asynchronous notifications as [`model::CoreEvent`]s.
 
 pub mod dragout;
@@ -15,6 +15,7 @@ pub mod forward;
 pub mod fs;
 pub mod hosts;
 pub mod known_hosts;
+pub mod layouts;
 pub mod model;
 mod persist;
 pub mod search;

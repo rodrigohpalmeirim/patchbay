@@ -1,11 +1,12 @@
 <script lang="ts">
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import PanelLeftClose from "@lucide/svelte/icons/panel-left-close";
   import Plus from "@lucide/svelte/icons/plus";
   import Search from "@lucide/svelte/icons/search";
   import Settings from "@lucide/svelte/icons/settings";
   import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
   import X from "@lucide/svelte/icons/x";
-  import { onMount } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { newHost, openHost } from "../actions";
   import { connections } from "../stores/connections.svelte";
   import { edits } from "../stores/edits.svelte";
@@ -28,6 +29,8 @@
   import TransferIndicator from "./TransferIndicator.svelte";
   import Cable from "@lucide/svelte/icons/cable";
   import { forwards } from "../stores/forwards.svelte";
+  import { session } from "../stores/session.svelte";
+  import { focusTabPanel } from "../tabFocus";
 
   interface Section {
     key: string;
@@ -35,6 +38,7 @@
     hosts: { host: Host; highlight: number[] }[];
   }
 
+  let asideEl = $state<HTMLElement>();
   let query = $state("");
   let searchEl = $state<HTMLInputElement>();
   let listEl = $state<HTMLElement>();
@@ -89,9 +93,21 @@
 
   onMount(() => {
     ui.focusSearch = () => {
-      searchEl?.focus();
-      searchEl?.select();
+      ui.toggleSidebar(true);
+      void tick().then(() => {
+        searchEl?.focus();
+        searchEl?.select();
+      });
     };
+  });
+
+  // Hidden while it had the keyboard focus: the active tab takes it.
+  $effect(() => {
+    if (ui.sidebarOpen || !asideEl?.contains(document.activeElement)) return;
+    untrack(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+      focusTabPanel(tabs.activeId);
+    });
   });
 
   function focusNav(key: string | undefined) {
@@ -210,7 +226,17 @@
   const connectedCount = $derived(hosts.list.filter((h) => connections.get(h.id).phase === "connected").length);
 </script>
 
-<aside class="sidebar" style:width="{settings.sidebarWidth}px" class:resizing aria-label="Hosts sidebar">
+<aside
+  bind:this={asideEl}
+  class="sidebar"
+  class:hidden={!ui.sidebarOpen}
+  class:animated={!session.pending}
+  style:width="{settings.sidebarWidth}px"
+  style:margin-left={ui.sidebarOpen ? null : `-${settings.sidebarWidth}px`}
+  class:resizing
+  inert={!ui.sidebarOpen}
+  aria-label="Hosts sidebar"
+>
   <header class="head">
     <div class="search">
       <Search size={14} class="search-icon" />
@@ -235,6 +261,9 @@
     </div>
     <button class="icon-btn" title="Add host ({modKey}+N)" aria-label="Add host" onclick={() => newHost()}>
       <Plus size={16} />
+    </button>
+    <button class="icon-btn" title="Hide sidebar ({modKey}+B)" aria-label="Hide sidebar" onclick={() => ui.toggleSidebar(false)}>
+      <PanelLeftClose size={16} />
     </button>
   </header>
 
@@ -406,6 +435,20 @@
     min-width: 0;
     background: var(--bg-sidebar);
     border-right: 1px solid var(--border);
+  }
+  /* Hidden: slides out to the left, then stops being rendered. */
+  .sidebar.hidden {
+    visibility: hidden;
+  }
+  .sidebar.animated {
+    transition:
+      margin-left var(--dur) var(--ease-out),
+      visibility 0s;
+  }
+  .sidebar.animated.hidden {
+    transition:
+      margin-left var(--dur) var(--ease-out),
+      visibility 0s var(--dur);
   }
   .head {
     display: flex;

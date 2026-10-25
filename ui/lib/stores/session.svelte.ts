@@ -1,10 +1,17 @@
-// Session restore: the open tabs, their groups (split view) and per-tab
-// state are saved to localStorage as they change and brought back on launch.
+// Session restore: each window's open tabs, their groups (split view) and
+// per-tab state are saved as they change and brought back on launch.
 //
-// Storage: key `patchbay.session.v1`, JSON `{ version: 2, savedAt, tabs, groups,
-// layout, focused }` (`groups` with their tab order, `layout` the split tree of
-// group ids, `focused` a group id). Version 1 had at most two groups side by
-// side (`focused` an index, `splitRatio`) and is migrated in `parse`. Tabs are
+// Storage: the backend keeps every window's session with its geometry and
+// whether its sidebar is hidden (src-tauri/src/window.rs, `windows.json`;
+// the sidebar comes back even when tabs aren't restored) and reopens the
+// windows at launch; closing a window while others stay open forgets it. A
+// session is JSON `{ version: 2, savedAt, tabs, groups, layout, focused }`
+// (`groups` with their tab order, `layout` the split tree of group ids,
+// `focused` a group id).
+// Before there were several windows, the one session lived in localStorage
+// (key `patchbay.session.v1`); the first window takes it over once. Version 1
+// had at most two groups side by side (`focused` an index, `splitRatio`) and
+// is migrated in `parse`. Tabs are
 // stored as their (already serializable) descriptors — files tabs keep their
 // path, terminal tabs their pane tree with each pane's last known directory
 // (OSC 7). Everything is validated on load; unknown kinds, tabs of deleted
@@ -18,14 +25,17 @@
 
 import { untrack } from "svelte";
 import { leaves, type PaneNode } from "../terminal/layout";
-import type { HostId } from "../types";
+import type { HostId, WindowSession } from "../types";
 import { clampRatio, type Tree } from "../util/splitTree";
+import { attempt } from "./backend";
 import { connections } from "./connections.svelte";
 import { hosts } from "./hosts.svelte";
 import { settings } from "./settings.svelte";
 import { tabs, type Group, type GroupNode, type Tab } from "./tabs.svelte";
+import { ui } from "./ui.svelte";
 
-const KEY = "patchbay.session.v1";
+/** Where the single-window session of earlier versions is. */
+const LEGACY_KEY = "patchbay.session.v1";
 const VERSION = 2;
 const SAVE_DELAY = 400;
 const MAX_TABS = 200;
@@ -86,8 +96,11 @@ function parseLayout(raw: unknown): PaneNode | null {
   return parseTree(raw, (r, id) => (r.type === "pane" ? { type: "pane" as const, id, cwd: optStr(r.cwd) } : null));
 }
 
-/** `currentId` maps a saved host id to the host's current id, or null if it is gone. */
-function parseTab(raw: unknown, currentId: (id: HostId) => HostId | null): Tab | null {
+/**
+ * `currentId` maps a saved host id to the host's current id, or null if it is
+ * gone. Also checks tabs moved here from another window.
+ */
+export function parseTab(raw: unknown, currentId: (id: HostId) => HostId | null): Tab | null {
   if (!isObj(raw)) return null;
   const id = str(raw.id);
   if (!id) return null;
@@ -199,11 +212,22 @@ function parse(raw: unknown, currentId: (id: HostId) => HostId | null) {
 // ---------------------------------------------------------------- store
 
 /** Tabs whose view needs the host connected to show anything. */
-const needsConnection = (t: Tab): t is Tab & { hostId: HostId } =>
+export const needsConnection = (t: Tab): t is Tab & { hostId: HostId } =>
   t.hostId !== null && (t.kind === "files" || t.kind === "terminal");
 
-function connectIdle(hostId: HostId) {
+export function connectIdle(hostId: HostId) {
   if (connections.get(hostId).phase === "idle") void connections.connect(hostId);
+}
+
+/** The single-window session of earlier versions, removed from localStorage (the backend keeps it from now on). */
+function takeLegacy(): unknown {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LEGACY_KEY) ?? "null");
+    localStorage.removeItem(LEGACY_KEY);
+    return raw;
+  } catch {
+    return null;
+  }
 }
 
 class Session {
@@ -213,17 +237,26 @@ class Session {
   restoredCount = $state(0);
 
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #saved: Promise<WindowSession | undefined> | null = null;
 
-  /** Restores the saved session if enabled. Call once hosts are loaded. */
-  restore(): boolean {
+  #fetch(): Promise<WindowSession | undefined> {
+    return (this.#saved ??= attempt((b) => b.windowSession(), { toast: false }));
+  }
+
+  /** Fetches this window's saved session and hides its sidebar if it was, before hosts and tabs load. */
+  async load() {
+    const saved = await this.#fetch();
+    if (saved?.sidebarHidden === true) ui.toggleSidebar(false);
+  }
+
+  /** Restores this window's saved session if enabled. Call once hosts are loaded. */
+  async restore(): Promise<boolean> {
     try {
       if (!settings.session.restoreTabs || tabs.list.length > 0) return false;
-      let raw: unknown;
-      try {
-        raw = JSON.parse(localStorage.getItem(KEY) ?? "null");
-      } catch {
-        return false;
-      }
+      const saved = await this.#fetch();
+      if (!saved) return false;
+      const raw = saved.session ?? (saved.migrate ? takeLegacy() : null);
+      if (tabs.list.length > 0) return false;
       const state = parse(raw, (id) => hosts.currentId(id));
       if (!state || !state.list.length) return false;
       const eager = settings.session.reconnect === "eager";
@@ -247,12 +280,15 @@ class Session {
     const flush = () => this.#save();
     window.addEventListener("pagehide", flush);
     const stop = $effect.root(() => {
-      // Save (debounced) on any change to tabs, groups or per-tab state.
+      // Save (debounced) on any change to tabs, groups, per-tab state or the sidebar.
       $effect(() => {
         void JSON.stringify(tabs.list);
         void JSON.stringify(tabs.groups);
         void JSON.stringify(tabs.layout);
         void tabs.focusedGroup;
+        void ui.sidebarOpen;
+        // The backend needs it to decide which windows to reopen.
+        void settings.session.restoreTabs;
         untrack(() => {
           clearTimeout(this.#timer);
           this.#timer = setTimeout(() => this.#save(), SAVE_DELAY);
@@ -280,11 +316,7 @@ class Session {
   #save() {
     clearTimeout(this.#timer);
     this.#timer = undefined;
-    try {
-      localStorage.setItem(KEY, JSON.stringify(snapshot()));
-    } catch {
-      // Storage full or unavailable: the session just isn't remembered.
-    }
+    void attempt((b) => b.windowSaveSession(snapshot(), !ui.sidebarOpen, settings.session.restoreTabs), { toast: false });
   }
 }
 

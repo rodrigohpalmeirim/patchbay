@@ -1,10 +1,15 @@
-// User preferences persisted in localStorage.
+// User preferences persisted in localStorage, and handed to the other
+// windows as they change (see `adopt`).
+
+import { attempt } from "./backend";
 
 export type ThemePref = "system" | "light" | "dark";
 export type CursorStyle = "block" | "bar" | "underline";
 export type BellStyle = "visual" | "none";
 
 const KEY = "patchbay.settings.v1";
+/** Topic for sharing the settings with the other windows. */
+export const SETTINGS_TOPIC = "settings";
 
 export interface TerminalPrefs {
   /** CSS font-family list; "" = the default monospace stack. */
@@ -97,18 +102,21 @@ function loadTerminal(raw: unknown): TerminalPrefs {
   };
 }
 
+function parse(raw: unknown): Persisted {
+  const p = (raw && typeof raw === "object" ? raw : {}) as Partial<Persisted>;
+  return {
+    theme: p.theme === "light" || p.theme === "dark" ? p.theme : "system",
+    sidebarWidth: typeof p.sidebarWidth === "number" ? p.sidebarWidth : DEFAULTS.sidebarWidth,
+    collapsedGroups: Array.isArray(p.collapsedGroups) ? p.collapsedGroups.map(String) : [],
+    terminal: loadTerminal(p.terminal),
+    session: loadSession(p.session),
+  };
+}
+
 function load(): Persisted {
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return structuredClone(DEFAULTS);
-    const p = JSON.parse(raw) as Partial<Persisted>;
-    return {
-      theme: p.theme === "light" || p.theme === "dark" ? p.theme : "system",
-      sidebarWidth: typeof p.sidebarWidth === "number" ? p.sidebarWidth : DEFAULTS.sidebarWidth,
-      collapsedGroups: Array.isArray(p.collapsedGroups) ? p.collapsedGroups.map(String) : [],
-      terminal: loadTerminal(p.terminal),
-      session: loadSession(p.session),
-    };
+    return raw ? parse(JSON.parse(raw)) : structuredClone(DEFAULTS);
   } catch {
     return structuredClone(DEFAULTS);
   }
@@ -178,6 +186,17 @@ class Settings {
     this.#save();
   }
 
+  /** Takes over settings changed (and already saved) in another window. */
+  adopt(raw: unknown) {
+    const p = parse(raw);
+    this.theme = p.theme;
+    this.sidebarWidth = Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, p.sidebarWidth)));
+    this.collapsedGroups = p.collapsedGroups;
+    this.terminal = p.terminal;
+    this.session = p.session;
+    this.#apply();
+  }
+
   #apply() {
     if (typeof document === "undefined") return;
     const resolved = this.theme === "system" ? (this.systemDark ? "dark" : "light") : this.theme;
@@ -185,18 +204,19 @@ class Settings {
   }
 
   #save() {
+    const data: Persisted = $state.snapshot({
+      theme: this.theme,
+      sidebarWidth: this.sidebarWidth,
+      collapsedGroups: this.collapsedGroups,
+      terminal: this.terminal,
+      session: this.session,
+    });
     try {
-      const data: Persisted = {
-        theme: this.theme,
-        sidebarWidth: this.sidebarWidth,
-        collapsedGroups: this.collapsedGroups,
-        terminal: this.terminal,
-        session: this.session,
-      };
       localStorage.setItem(KEY, JSON.stringify(data));
     } catch {
       // Storage unavailable (private mode etc.): settings just won't persist.
     }
+    void attempt((b) => b.share(SETTINGS_TOPIC, data), { toast: false });
   }
 }
 

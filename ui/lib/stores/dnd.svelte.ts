@@ -23,19 +23,31 @@
 // matching pointerup after that, which is why the internal drag is torn
 // down first. If the native drag comes back into the window and is dropped
 // on a pane, the original entries are copied there (not the temporary copy).
+//
+// Tabs (not panes) can leave the window (stores/windows.svelte.ts); the
+// pointer is captured as for file drags. Outside the window the source sends
+// the pointer's screen position to the backend, which shows the drag to the
+// Patchbay window under it (`tabOver` there): that window finds the drop
+// target with its own hit testing (`incomingTarget`, the same as for its own
+// tabs, or anywhere else in it: just into the window) and shows it with a
+// ghost. Released there, the tab moves to that window, which places it at
+// the drop point again (`placeMovedTab`). Released elsewhere, it is torn off
+// into a new window at the pointer. On Wayland, where windows don't know
+// where they are, there is never a window under the pointer.
 
 import { getBackend, isTauri, type Unlisten } from "../api";
-import type { FileEntry, HostId } from "../types";
+import type { DraggedTab, FileEntry, HostId, TabDragIn } from "../types";
 import { dirname, isWithin, normalize } from "../util/paths";
 import { isMac } from "../util/platform";
 import { sentence, toCommandError } from "../util/errors";
 import { DragOut, dragIcon } from "./dragout.svelte";
 import { files } from "./files.svelte";
 import type { Direction } from "../util/splitTree";
-import { canJoin, joinPanes, movePaneToTab } from "../terminal/ops";
-import { GROUP_MIN_H, GROUP_MIN_W, tabs } from "./tabs.svelte";
+import { canJoin, graftPanes, joinPanes, movePaneToTab } from "../terminal/ops";
+import { GROUP_MIN_H, GROUP_MIN_W, tabs, type Tab } from "./tabs.svelte";
 import { toasts } from "./toasts.svelte";
 import { transfers } from "./transfers.svelte";
+import { windows } from "./windows.svelte";
 
 export interface DropTarget {
   paneId: string;
@@ -86,6 +98,22 @@ export interface TabDrag {
   x: number;
   y: number;
   target: TabDropTarget | null;
+  /** A tab outside the window: released there, it moves to another window or a new one. */
+  outside: boolean;
+}
+
+/** Anywhere else in a window a tab of another window is dragged over: it goes in next to the active tab. */
+export interface WindowDropTarget {
+  kind: "window";
+  rect: DropRect;
+}
+
+/** A tab of another window dragged over this one. */
+export interface IncomingTabDrag {
+  tab: DraggedTab;
+  x: number;
+  y: number;
+  target: TabDropTarget | WindowDropTarget;
 }
 
 export interface OsDrag {
@@ -139,6 +167,8 @@ export function dropIsMove(drag: FileDrag): boolean {
 class Dnd {
   file = $state<FileDrag | null>(null);
   tab = $state<TabDrag | null>(null);
+  /** A tab of another window over this one. */
+  incoming = $state<IncomingTabDrag | null>(null);
   os = $state<OsDrag | null>(null);
   /** Local paths for dragging the current file drag out of the window. */
   out = $state<DragOut | null>(null);
@@ -248,51 +278,103 @@ class Dnd {
   }
 
   /**
-   * Arms a tab drag (reorder, move to another group, split, join a terminal),
-   * or with `pane` a drag of one pane of terminal tab `id`.
+   * Arms a tab drag (reorder, move to another group, split, join a terminal,
+   * move to another window or tear off into a new one), or with `pane` a
+   * drag of one pane of terminal tab `id`. `title` is what other windows
+   * show while the tab is over them.
    */
-  armTabDrag(e: PointerEvent, id: string, pane: string | null = null) {
+  armTabDrag(e: PointerEvent, id: string, pane: string | null = null, title = "") {
     const sx = e.clientX;
     const sy = e.clientY;
+    const captureEl = e.currentTarget instanceof Element ? e.currentTarget : null;
+    const tearable = !pane && windows.canOpen;
+    let pointerId: number | null = null;
     let started = false;
+    const dragged = (): DraggedTab | null => {
+      const tab = tabs.get(id);
+      return tab ? { id, kind: tab.kind, hostId: tab.hostId, title } : null;
+    };
+    const screen = (ev: PointerEvent) => ({ x: ev.screenX, y: ev.screenY });
     const move = (ev: PointerEvent) => {
       if (!started) {
         if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < THRESHOLD) return;
         started = true;
         document.body.classList.add("dragging");
-        this.tab = { id, pane, x: ev.clientX, y: ev.clientY, target: null };
+        if (tearable) {
+          try {
+            captureEl?.setPointerCapture(ev.pointerId);
+            pointerId = ev.pointerId;
+          } catch {
+            // Pointer already gone; the drag simply stays inside the window.
+          }
+        }
+        this.tab = { id, pane, x: ev.clientX, y: ev.clientY, target: null, outside: false };
       }
       if (!this.tab) return;
       this.tab.x = ev.clientX;
       this.tab.y = ev.clientY;
-      this.tab.target = tabTarget(id, pane, ev.clientX, ev.clientY);
+      this.tab.outside = tearable && isOutside(ev);
+      this.tab.target = this.tab.outside ? null : tabTarget(id, pane, ev.clientX, ev.clientY);
+      document.body.classList.toggle("dragging", !this.tab.outside);
+      const tab = this.tab.outside ? dragged() : null;
+      if (tab) windows.dragTab(tab, screen(ev));
+      else windows.dragLeave();
     };
     const key = (ev: KeyboardEvent) => {
       if (ev.key === "Escape" && this.tab) {
         ev.preventDefault();
         ev.stopPropagation();
-        this.tab = null;
-        stop();
-        this.#suppressClick();
+        end();
       }
     };
-    const up = () => {
+    const up = (ev: PointerEvent) => {
       const t = this.tab;
-      stop();
-      if (!started || !t) return;
+      if (!started || !t) return stop();
+      const tab = tearable && isOutside(ev) ? dragged() : null;
       this.tab = null;
+      stop();
       this.#suppressClick();
-      if (t.target) drop(id, pane, t.target);
+      if (tab) void this.#dropOutside(tab, screen(ev));
+      else {
+        windows.dragLeave();
+        if (t.target) drop(id, pane, t.target);
+      }
+    };
+    const end = () => {
+      this.tab = null;
+      windows.dragLeave();
+      stop();
+      this.#suppressClick();
     };
     const stop = () => {
+      if (pointerId !== null && captureEl?.hasPointerCapture(pointerId)) captureEl.releasePointerCapture(pointerId);
+      pointerId = null;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
       window.removeEventListener("keydown", key, true);
       document.body.classList.remove("dragging");
     };
+    const cancel = () => {
+      if (started) end();
+      else stop();
+    };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
     window.addEventListener("keydown", key, true);
+  }
+
+  /** Tab `tab` was released outside the window: into the Patchbay window there, else a new one. */
+  async #dropOutside(tab: DraggedTab, at: { x: number; y: number }) {
+    const over = await windows.dragDrop(tab, at);
+    if (over) void windows.moveTab(tab.id, over.label, null, { x: over.x, y: over.y });
+    else void windows.moveTab(tab.id, null, at);
+  }
+
+  /** A tab of another window is dragged over this one at a point of the viewport (null: it left). */
+  tabOver(drag: TabDragIn | null) {
+    this.incoming = drag && { ...drag, target: incomingTarget(drag.tab, drag.x, drag.y) };
   }
 
   async #startNative(drag: FileDrag, paths: string[], onDrop: (drag: FileDrag) => void) {
@@ -365,7 +447,17 @@ function half(r: DOMRect, side: Direction): DropRect {
   return out;
 }
 
-function tabTarget(id: string, pane: string | null, x: number, y: number): TabDropTarget | null {
+/**
+ * Where tab `id` (or its pane `pane`) dropped at viewport point (x, y) goes.
+ * `tab` describes it; a tab of another window isn't in `tabs`.
+ */
+function tabTarget(
+  id: string,
+  pane: string | null,
+  x: number,
+  y: number,
+  tab: Pick<DraggedTab, "kind" | "hostId"> | undefined = tabs.get(id),
+): TabDropTarget | null {
   const el = document.elementFromPoint(x, y);
   const strip = el?.closest<HTMLElement>("[data-strip-group]");
   if (strip) {
@@ -390,7 +482,7 @@ function tabTarget(id: string, pane: string | null, x: number, y: number): TabDr
   const own = tabs.groupOf(id) === group;
   // A terminal can join the terminal shown there (a tab not into itself).
   const shown = tabs.get(tabs.group(group)?.activeId ?? "");
-  const joinable = canJoin(tabs.get(id), shown) && (shown?.id !== id || !!pane);
+  const joinable = canJoin(tab, shown) && (shown?.id !== id || !!pane);
 
   // Near the group's edge: split the group, if there is room for two.
   const [edge, dist] = nearestEdge(r, x, y);
@@ -410,6 +502,33 @@ function tabTarget(id: string, pane: string | null, x: number, y: number): TabDr
   // The middle: into the group.
   if (own) return null;
   return { kind: "group", group, edge: null, rect: { left: r.left, top: r.top, width: r.width, height: r.height } };
+}
+
+/** Where a tab of another window dropped at viewport point (x, y) goes: like one of ours, else just into this window. */
+function incomingTarget(tab: Pick<DraggedTab, "id" | "kind" | "hostId">, x: number, y: number): TabDropTarget | WindowDropTarget {
+  const target = tabTarget(tab.id, null, x, y, tab);
+  if (target) return target;
+  const r = document.querySelector("[data-window-drop]")?.getBoundingClientRect() ?? new DOMRect(0, 0, window.innerWidth, window.innerHeight);
+  return { kind: "window", rect: { left: r.left, top: r.top, width: r.width, height: r.height } };
+}
+
+/**
+ * Places tab `tab`, just moved here from another window, where it was
+ * dropped (viewport point x, y): the target shown while it was dragged over
+ * this window. Returns the tab shown.
+ */
+export function placeMovedTab(tab: Tab, x: number, y: number, dormant: boolean): Tab {
+  const target = incomingTarget(tab, x, y);
+  if (target.kind === "pane") {
+    const into = tabs.get(target.tab);
+    if (tab.kind === "terminal" && into?.kind === "terminal" && canJoin(tab, into)) {
+      graftPanes(into, target.pane, target.edge, tab.layout, tab.focusedPane);
+      return into;
+    }
+  } else if (target.kind === "strip") return tabs.insert(tab, { dormant, group: target.group, index: target.index });
+  else if (target.kind === "group" && target.edge) return tabs.insert(tab, { dormant, group: { split: target.edge, of: target.group } });
+  else if (target.kind === "group") return tabs.insert(tab, { dormant, group: target.group, index: tabs.group(target.group)?.tabIds.length });
+  return tabs.insert(tab, { dormant });
 }
 
 export const dnd = new Dnd();

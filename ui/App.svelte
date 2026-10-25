@@ -4,6 +4,7 @@
   import ContextMenu from "./lib/components/ContextMenu.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import DragGhost from "./lib/components/DragGhost.svelte";
+  import TabDropOverlay from "./lib/components/TabDropOverlay.svelte";
   import Toasts from "./lib/components/Toasts.svelte";
   import TransfersPanel from "./lib/components/TransfersPanel.svelte";
   import Workspace from "./lib/components/Workspace.svelte";
@@ -23,15 +24,18 @@
   import { session } from "./lib/stores/session.svelte";
   import { prompts } from "./lib/stores/prompts.svelte";
   import { files } from "./lib/stores/files.svelte";
+  import { hosts } from "./lib/stores/hosts.svelte";
   import { tabs } from "./lib/stores/tabs.svelte";
   import { transfers } from "./lib/stores/transfers.svelte";
   import { toasts } from "./lib/stores/toasts.svelte";
   import { ui } from "./lib/stores/ui.svelte";
+  import { windows } from "./lib/stores/windows.svelte";
   import { toCommandError } from "./lib/util/errors";
   import { hasMod, isEditable, isMac } from "./lib/util/platform";
   import { inTerminal, isNewTerminalKey } from "./lib/terminal/keys";
   import { newTerminalForActive } from "./lib/terminal/ops";
   import { focusTabPanel } from "./lib/tabFocus";
+  import { tabDef } from "./lib/views/tabKinds";
   import Welcome from "./lib/views/Welcome.svelte";
 
   onMount(() => {
@@ -40,11 +44,22 @@
     startApp()
       .then((fn) => (disposed ? fn() : (stop = fn)))
       .catch((e) => toasts.error(toCommandError(e), "Patchbay couldn't start"));
-    startUpdateChecks();
     return () => {
       disposed = true;
       stop?.();
     };
+  });
+
+  // Once per app: in the oldest window, taken over by another one when it closes.
+  $effect(() => {
+    if (windows.leader) startUpdateChecks();
+  });
+
+  // The window's title shows its active tab; the other windows list it the
+  // same way ("Move to window" in their tab menus).
+  $effect(() => {
+    const tab = tabs.active;
+    windows.describe(tab ? tabDef(tab).title(tab, hosts.get(tab.hostId)) : null, tabs.list.length);
   });
 
   function onkeydown(e: KeyboardEvent) {
@@ -55,7 +70,7 @@
     const key = e.key.toLowerCase();
 
     const active = tabs.active;
-    // Inside a terminal, Ctrl combinations belong to the shell (Ctrl+W/N/F/\
+    // Inside a terminal, Ctrl combinations belong to the shell (Ctrl+W/N/F/B/\
     // are readline / signals); only the shortcuts in terminal/keys.ts
     // `passesToApp` get here. Cmd on macOS never reaches the shell.
     const shellOwnsCtrl = !isMac && inTerminal(e.target);
@@ -63,7 +78,7 @@
     if (isNewTerminalKey(e)) {
       e.preventDefault();
       newTerminalForActive();
-    } else if (shellOwnsCtrl && mod && ["f", "n", "w", "\\"].includes(key)) {
+    } else if (shellOwnsCtrl && mod && ["b", "f", "n", "w", "\\"].includes(key)) {
       return;
     } else if (mod && key === "f" && active?.kind === "files") {
       // Search inside the focused files tab.
@@ -72,6 +87,9 @@
     } else if ((mod && key === "f") || (e.key === "/" && !mod && !isEditable(e.target))) {
       e.preventDefault();
       ui.focusSearch();
+    } else if (mod && !e.shiftKey && !e.altKey && key === "b") {
+      e.preventDefault();
+      ui.toggleSidebar();
     } else if (mod && !e.shiftKey && key === "n") {
       e.preventDefault();
       newHost();
@@ -120,7 +138,7 @@
 
 <div class="app">
   <Sidebar />
-  <main class="main">
+  <main class="main" data-window-drop>
     {#if tabs.list.length > 0}
       <Workspace />
     {:else if !session.pending}
@@ -179,6 +197,7 @@
   <ContextMenu menu={ui.menu} />
 {/if}
 <DragGhost />
+<TabDropOverlay />
 <Toasts />
 
 <style>

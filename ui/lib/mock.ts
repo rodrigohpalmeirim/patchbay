@@ -40,6 +40,10 @@
 //
 // Port forwards and backend settings: mock/forwards.ts (scripted states are
 // listed there). Editing in local apps and drag-out: mock/edit.ts.
+//
+// Windows: the browser tab is the only window ("New window" and moving tabs
+// to other windows are disabled; its title is the document's); its tabs are
+// saved in localStorage.
 
 import type { Backend, Unlisten } from "./api";
 import { createEdits } from "./mock/edit";
@@ -309,6 +313,11 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** Where the browser preview keeps its tabs (where the app did before it had several windows). */
+const SESSION_KEY = "patchbay.session.v1";
+/** And whether its sidebar is hidden (before: `sidebarHidden` in the tabs). */
+const SIDEBAR_KEY = "patchbay.sidebarHidden";
+
 function uuid(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
@@ -351,6 +360,7 @@ export function createMockBackend(): Backend {
   const sessions = new Map<HostId, { abort: AbortController; connected: boolean }>();
   /** In-flight connect() calls, so forwards can join an attempt instead of restarting it. */
   const connecting = new Map<HostId, Promise<void>>();
+  const shared = new Map<string, unknown>();
 
   const emit = (e: CoreEvent) => {
     if (e.type === "connection") {
@@ -797,6 +807,74 @@ export function createMockBackend(): Backend {
     },
     async listConnections() {
       return Object.fromEntries(structuredClone([...states]));
+    },
+    async windowOpen() {
+      throw err("unsupported", "the browser preview has a single window");
+    },
+    async windowMoveTab() {
+      throw err("unsupported", "the browser preview has a single window");
+    },
+    async windowTakeTabs() {
+      return [];
+    },
+    async onTabsIncoming(): Promise<Unlisten> {
+      return () => {};
+    },
+    async windowDescribe() {},
+    async windowSetTitle(title) {
+      document.title = title;
+    },
+    async windowDragTab() {
+      return null;
+    },
+    async onTabDragOver(): Promise<Unlisten> {
+      return () => {};
+    },
+    async terminalDetach() {
+      throw err("unsupported", "the browser preview has a single window");
+    },
+    async terminalResume() {},
+    async terminalAttach() {
+      throw err("unsupported", "the browser preview has a single window");
+    },
+    async windowClose() {},
+    async windowInfo() {
+      return { label: "main", leader: "main", active: "main", count: 1, windows: [{ label: "main", title: null, tabs: 0, number: 1 }] };
+    },
+    async windowSession() {
+      try {
+        const session = JSON.parse(localStorage.getItem(SESSION_KEY) ?? "null");
+        const hidden = localStorage.getItem(SIDEBAR_KEY);
+        return { session, sidebarHidden: hidden === null ? session?.sidebarHidden === true : hidden === "true", migrate: false };
+      } catch {
+        return { session: null, sidebarHidden: false, migrate: false };
+      }
+    },
+    async windowSaveSession(session, sidebarHidden) {
+      try {
+        localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+        localStorage.setItem(SIDEBAR_KEY, String(sidebarHidden));
+      } catch {
+        // Not remembered.
+      }
+    },
+    async windowPrompts() {
+      return [];
+    },
+    async share(topic, value) {
+      shared.set(topic, structuredClone(value));
+    },
+    async shared(topic) {
+      return structuredClone(shared.get(topic));
+    },
+    async onShared(): Promise<Unlisten> {
+      return () => {};
+    },
+    async onWindowsChanged(): Promise<Unlisten> {
+      return () => {};
+    },
+    async onCloseRequested(): Promise<Unlisten> {
+      return () => {};
     },
   };
 }
