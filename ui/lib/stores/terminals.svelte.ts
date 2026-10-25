@@ -19,7 +19,7 @@ import { passesToApp, terminalAction } from "../terminal/keys";
 import { disableWebgl, loadWebgl, loadXterm, searchDecorations, terminalTheme } from "../terminal/xterm";
 import type { CommandError, CoreEvent, HostId } from "../types";
 import { toCommandError } from "../util/errors";
-import { isMac } from "../util/platform";
+import { isMac, isWindows } from "../util/platform";
 import { attempt, call } from "./backend";
 import { connections } from "./connections.svelte";
 import { DEFAULT_TERMINAL_FONT, settings } from "./settings.svelte";
@@ -259,7 +259,15 @@ export class TermSession {
     const WebglAddon = await loadWebgl();
     if (!WebglAddon || !this.term || this.#disposed) return;
     try {
-      const addon = new WebglAddon();
+      // preserveDrawingBuffer, on the WebKit webviews (Linux, macOS): there a
+      // frame drawn without any other change on the page is not shown until
+      // something else repaints (the canvas keeps showing the previous
+      // frame). With a blinking cursor the next blink hides that, but once
+      // the cursor stops blinking (a program sends DECRST 12, as `top` does
+      // on exit; the setting is off; the pane is unfocused) the last output
+      // stays invisible until the next key. WebView2 (Windows) presents every
+      // frame, so it is spared the extra buffer copy per frame.
+      const addon = new WebglAddon(!isWindows);
       addon.onContextLoss(() => {
         // GPU reset etc.: fall back to the DOM renderer.
         addon.dispose();

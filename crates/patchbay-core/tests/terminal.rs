@@ -591,6 +591,31 @@ async fn remote_resize() {
     h.terminals.close(t.info.id).await;
 }
 
+/// What a full-screen program prints last (here `top` quitting, then the
+/// prompt, which arrive as separate packets) is delivered without waiting
+/// for more input.
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_full_screen_program_output_arrives_without_input() {
+    require_docker!();
+    let h = Harness::new();
+    h.connect("test:term-top", TARGET_PORT).await;
+    let mut t = h.open(Some("test:term-top"), None).await;
+    h.write(&t, "PS1='pb-''prompt> '\n");
+    t.expect("pb-prompt> ").await;
+    h.write(&t, "top -d 1\n");
+    t.expect("Tasks:").await;
+    let quit_at = t.seen.len();
+    h.write(&t, "q");
+    // No further input from here on.
+    t.expect_with(|text| {
+        text.get(quit_at..)
+            .is_some_and(|after| after.contains("pb-prompt> "))
+            .then_some(())
+    })
+    .await;
+    h.terminals.close(t.info.id).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_sftp_only_is_unsupported() {
     require_docker!();
