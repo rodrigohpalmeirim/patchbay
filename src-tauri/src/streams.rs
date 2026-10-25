@@ -540,7 +540,14 @@ mod tests {
         timed(fx.exit(id)).await;
         assert!(fx.terminals.list().is_empty());
         // No end marker for a cancelled stream; the channel is just released.
-        assert!(timed(rx.recv()).await.is_none());
+        // (Output sent before the cancel may still be queued: "ready\r\n"
+        // above can be the echoed command line.)
+        timed(async {
+            while let Some(body) = rx.recv().await {
+                assert!(!raw(body).is_empty(), "end marker after cancelling");
+            }
+        })
+        .await;
     }
 
     /// Receives until `pred` holds for everything received so far.
@@ -564,13 +571,39 @@ mod tests {
             .is_err()
     }
 
-    /// The numbers printed one per line by `seq`, in order.
-    fn numbers(output: &[u8]) -> Vec<u64> {
-        String::from_utf8_lossy(output)
-            .split("\r\n")
-            // (The first may follow terminal modes the shell resets.)
-            .filter_map(|l| l.rsplit('\r').next()?.parse().ok())
+    // A command's output between two markers. The shell's own output (login
+    // banners, prompt, the echoed command line, terminal modes) comes before
+    // the start marker or after the end marker; only the command writes in
+    // between. `printf` assembles the markers, so the echoed command line
+    // does not contain them.
+    const START: &[u8] = b"patchbay-start\r\n";
+    const END: &[u8] = b"patchbay-end\r\n";
+
+    fn marked(command: &str) -> String {
+        format!("printf '%s-%s\\n' patchbay start; {command}; printf '%s-%s\\n' patchbay end")
+    }
+
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Where the marked output starts in `output`, once it has.
+    fn marked_start(output: &[u8]) -> Option<usize> {
+        find(output, START).map(|i| i + START.len())
+    }
+
+    /// Exactly what `seq 1 lines` prints to a terminal.
+    fn seq_output(lines: u64) -> Vec<u8> {
+        (1..=lines)
+            .flat_map(|n| format!("{n}\r\n").into_bytes())
             .collect()
+    }
+
+    /// Escaped `bytes[from..to]` (clamped), for failure messages.
+    fn excerpt(bytes: &[u8], from: usize, to: usize) -> String {
+        let to = to.min(bytes.len());
+        let from = from.min(to);
+        format!("[{from}..{to}] \"{}\"", bytes[from..to].escape_ascii())
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -578,12 +611,17 @@ mod tests {
         const LINES: u64 = 400_000;
         let mut fx = Fixture::new();
         let (id, mut a) = fx.open().await;
-        fx.write(id, &format!("seq 1 {LINES}; exit 0\n"));
+        let shell = fx.terminals.list().first().map(|t| t.shell.clone());
+        let command = marked(&format!("seq 1 {LINES}"));
+        fx.write(id, &format!("{command}; exit 0\n"));
 
         // The source gets some of it, then pauses: what it has received by
         // then is exactly what was sent, and nothing more arrives.
         let mut source = Vec::new();
-        receive_until(&mut a, &mut source, |s| numbers(s).len() > 1000).await;
+        receive_until(&mut a, &mut source, |s| {
+            marked_start(s).is_some_and(|i| s[i..].iter().filter(|&&b| b == b'\n').count() > 1000)
+        })
+        .await;
         let sent = fx.streams.pause(id, "main").unwrap();
         while let Ok(body) = a.try_recv() {
             source.extend(raw(body));
@@ -615,6 +653,7 @@ mod tests {
         }
         let max_chunk = 2 * patchbay_core::terminal::MAX_CHUNK as u64;
         assert!(target.len() as u64 <= HIGH_WATER + max_chunk + max_chunk);
+        let stalled_at = target.len();
         fx.streams.ack(id, target.len() as u64);
         timed(async {
             loop {
@@ -629,15 +668,41 @@ mod tests {
         .await;
         assert_eq!(timed(fx.exit(id)).await, Some(0));
 
-        // Every line exactly once, across both.
-        source.extend(target);
-        let got = numbers(&source);
-        let expected: Vec<u64> = (1..=LINES).collect();
-        assert!(
-            got == expected,
-            "{} lines, first difference at {:?}",
-            got.len(),
-            got.iter().zip(&expected).position(|(a, b)| a != b)
+        // Every byte exactly once, across both.
+        let (source_len, target_len) = (source.len(), target.len());
+        let mut all = source;
+        all.extend(target);
+        let start = marked_start(&all).expect("start marker");
+        let end = find(&all[start..], END).map(|i| start + i);
+        let got = &all[start..end.unwrap_or(all.len())];
+        let expected = seq_output(LINES);
+        if end.is_some() && got == expected {
+            return;
+        }
+        let diff = got
+            .iter()
+            .zip(&expected)
+            .position(|(g, e)| g != e)
+            .unwrap_or(got.len().min(expected.len()));
+        let at = start + diff;
+        panic!(
+            "seq output differs from byte {diff} on (line {line}, {side}), shell {shell:?}\n\
+             received {total} bytes: {source_len} by the source (sent at the pause: {sent}), \
+             {target_len} by the target (stalled at {stalled_at}); marked output \
+             [{start}..{end:?}] of {got_len} bytes, expected {expected_len}\n\
+             got      {got_excerpt}\n\
+             expected {expected_excerpt}\n\
+             before the start marker: {head}\n\
+             after the end: {tail}",
+            line = expected[..diff].iter().filter(|&&b| b == b'\n').count() + 1,
+            side = if at < source_len { "source" } else { "target" },
+            total = all.len(),
+            got_len = got.len(),
+            expected_len = expected.len(),
+            got_excerpt = excerpt(&all, at.saturating_sub(64), at + 64),
+            expected_excerpt = excerpt(&expected, diff.saturating_sub(64), diff + 64),
+            head = excerpt(&all, start.saturating_sub(START.len() + 512), start),
+            tail = excerpt(&all, end.unwrap_or(all.len()), all.len()),
         );
     }
 
