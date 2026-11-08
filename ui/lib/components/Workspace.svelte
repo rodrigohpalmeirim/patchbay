@@ -90,7 +90,12 @@
   {#each tabs.groups as g (g.id)}
     {@const r = layout.rects.get(g.id)}
     <div class="strip-slot" style={stripStyle(r)}>
-      <TabStrip group={g.id} focused={tabs.isSplit && tabs.focusedGroup === g.id} sidebarButton={!ui.sidebarOpen && !gap(r?.x ?? 0) && !gap(r?.y ?? 0)} />
+      <TabStrip
+        group={g.id}
+        focused={tabs.isSplit && tabs.focusedGroup === g.id}
+        sidebarButton={!ui.sidebarOpen && !gap(r?.x ?? 0) && !gap(r?.y ?? 0)}
+        windowControls={!gap(r?.y ?? 0) && (r ? r.x + r.w : 1) > 1 - 1e-6}
+      />
     </div>
   {/each}
 

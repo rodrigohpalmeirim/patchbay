@@ -68,6 +68,7 @@
   /* Where the tab strip has it. */
   .show-sidebar {
     position: absolute;
+    z-index: 2;
     top: 8px;
     left: 8px;
   }

@@ -62,6 +62,10 @@ const SHOW_FALLBACK: Duration = Duration::from_secs(3);
 /// Delay between the first page being loaded and auto-starting forwards, so
 /// the frontend has subscribed to prompts by the time a connection asks one.
 const AUTO_START_DELAY: Duration = Duration::from_secs(2);
+/// Windows draw their own title bar (the sidebar header and tab strips, with
+/// minimize / maximize / close buttons from the frontend) instead of the
+/// system's. macOS keeps its native one.
+const CUSTOM_TITLEBAR: bool = cfg!(not(target_os = "macos"));
 /// Debounce for writing `windows.json`.
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 /// Size and minimum size of new windows (as in `tauri.conf.json`).
@@ -410,6 +414,9 @@ pub fn init(app: &AppHandle) {
         positions_known: positions_known(),
     });
     if let Some(main) = app.get_webview_window(MAIN) {
+        if CUSTOM_TITLEBAR {
+            let _ = main.set_decorations(false);
+        }
         place(&main, geometry);
     }
     show_later(app, MAIN);
@@ -570,6 +577,7 @@ fn create(app: &AppHandle, saved: SavedWindow, show_on_load: bool) -> tauri::Res
         .title("Patchbay")
         .inner_size(DEFAULT_SIZE.0, DEFAULT_SIZE.1)
         .min_inner_size(MIN_SIZE.0, MIN_SIZE.1)
+        .decorations(!CUSTOM_TITLEBAR)
         .center()
         .visible(false)
         .build();

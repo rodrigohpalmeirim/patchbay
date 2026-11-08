@@ -24,3 +24,11 @@ export function isEditable(target: EventTarget | null): boolean {
   }
   return false;
 }
+
+/**
+ * The app draws its own title bar (window controls, drag regions): in the
+ * desktop app everywhere but macOS, which keeps its native one. Matches
+ * `CUSTOM_TITLEBAR` in src-tauri/src/window.rs.
+ */
+export const customTitlebar =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !isMac;
