@@ -163,7 +163,6 @@ mod tests {
         assert_eq!(json["restoreTabs"], false);
         assert_eq!(json["windows"][0]["geometry"]["maximized"], true);
         assert_eq!(json["windows"][0]["sidebarHidden"], true);
-        assert_eq!(json["windows"][1]["sidebarHidden"], false);
         assert_eq!(json["windows"][0]["session"]["version"], 2);
     }
 

@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use patchbay_core::model::{CoreEvent, TerminalSpec};
+use patchbay_core::model::{CoreEvent, TerminalInfo, TerminalSpec};
 use patchbay_core::session::SessionManager;
 use patchbay_core::terminal::{TerminalManager, TerminalOutput};
 use tokio::sync::{broadcast, mpsc};
@@ -20,37 +20,49 @@ async fn expect(out: &mut TerminalOutput, seen: &mut Vec<u8>, needle: &str) {
     .unwrap_or_else(|_| panic!("{needle:?} not in {:?}", String::from_utf8_lossy(seen)));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn local_conpty() {
-    let (events_tx, mut events) = broadcast::channel(64);
+fn manager() -> (TerminalManager, broadcast::Receiver<CoreEvent>) {
+    let (events_tx, events) = broadcast::channel(64);
     let (prompts, _) = mpsc::channel(1);
-    let terminals =
-        TerminalManager::new(SessionManager::new(events_tx.clone(), prompts), events_tx);
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().join("dir with spaces ü");
-    std::fs::create_dir(&cwd).unwrap();
+    let sessions = SessionManager::new(events_tx.clone(), prompts);
+    (TerminalManager::new(sessions, events_tx), events)
+}
 
+/// Opens a local terminal and answers ConPTY's cursor position query, which
+/// it sends before starting (xterm.js answers this by itself).
+async fn open(
+    terminals: &TerminalManager,
+    cwd: Option<String>,
+) -> (TerminalInfo, TerminalOutput, Vec<u8>) {
     let (info, mut out) = terminals
         .open(TerminalSpec {
             host_id: None,
-            cwd: Some(cwd.to_string_lossy().into_owned()),
+            cwd,
             cols: 80,
             rows: 24,
         })
         .await
         .unwrap();
+    let mut seen = Vec::new();
+    expect(&mut out, &mut seen, "\x1b[6n").await;
+    terminals.write(info.id, b"\x1b[1;1R".to_vec()).unwrap();
+    (info, out, seen)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_conpty() {
+    let (terminals, mut events) = manager();
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("dir with spaces ü");
+    std::fs::create_dir(&cwd).unwrap();
+
+    let (info, mut out, mut seen) = open(&terminals, Some(cwd.to_string_lossy().into())).await;
     eprintln!("shell: {}", info.shell);
     assert!(
         info.shell == "pwsh" || info.shell == "powershell",
         "{}",
         info.shell
     );
-    let mut seen = Vec::new();
     let write = |s: &str| terminals.write(info.id, s.as_bytes().to_vec()).unwrap();
-    // ConPTY asks for the cursor position before starting (xterm.js answers
-    // this by itself).
-    expect(&mut out, &mut seen, "\x1b[6n").await;
-    write("\x1b[1;1R");
 
     write("echo \"hi-$(1+2) $env:TERM_PROGRAM\"\r");
     expect(&mut out, &mut seen, "hi-3 Patchbay").await;
@@ -99,25 +111,13 @@ async fn local_conpty() {
     .unwrap();
     assert_eq!(exit, Some(7));
 
-    // Closing a running shell.
-    let (info, out) = terminals
-        .open(TerminalSpec {
-            host_id: None,
-            cwd: None,
-            cols: 80,
-            rows: 24,
-        })
-        .await
-        .unwrap();
-    let mut out = out;
-    expect(&mut out, &mut Vec::new(), "\x1b[6n").await;
-    terminals.write(info.id, b"\x1b[1;1R".to_vec()).unwrap();
+    // Closing a running shell (its output is still held).
+    let (info, _out, _) = open(&terminals, None).await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
     let started = Instant::now();
     terminals.close(info.id).await;
     eprintln!("close took {:?}", started.elapsed());
     assert!(terminals.list().is_empty());
-    drop(out);
 }
 
 #[link(name = "kernel32")]
@@ -135,23 +135,9 @@ unsafe extern "system" {
 async fn ctrl_c_interrupts_console_programs() {
     // SAFETY: plain Win32 call; makes this process (and children) ignore Ctrl+C.
     assert_ne!(unsafe { SetConsoleCtrlHandler(None, 1) }, 0);
-    let (events_tx, _events) = broadcast::channel(64);
-    let (prompts, _) = mpsc::channel(1);
-    let terminals =
-        TerminalManager::new(SessionManager::new(events_tx.clone(), prompts), events_tx);
-    let (info, mut out) = terminals
-        .open(TerminalSpec {
-            host_id: None,
-            cwd: None,
-            cols: 80,
-            rows: 24,
-        })
-        .await
-        .unwrap();
-    let mut seen = Vec::new();
+    let (terminals, _events) = manager();
+    let (info, mut out, mut seen) = open(&terminals, None).await;
     let write = |s: &str| terminals.write(info.id, s.as_bytes().to_vec()).unwrap();
-    expect(&mut out, &mut seen, "\x1b[6n").await;
-    write("\x1b[1;1R");
     write("ping -n 60 127.0.0.1\r");
     expect(&mut out, &mut seen, "Reply from 127.0.0.1").await;
     write("\x03");

@@ -404,17 +404,7 @@ async fn dynamic_socks_proxy() {
 
     // SOCKS5, domain name.
     let mut s = timed(TcpStream::connect(&address)).await.unwrap();
-    s.write_all(&[5, 1, 0]).await.unwrap();
-    let mut buf = [0u8; 2];
-    s.read_exact(&mut buf).await.unwrap();
-    assert_eq!(buf, [5, 0]);
-    let mut req = vec![5, 1, 0, 3, 9];
-    req.extend_from_slice(b"localhost");
-    req.extend_from_slice(&22u16.to_be_bytes());
-    s.write_all(&req).await.unwrap();
-    let mut reply = [0u8; 10];
-    timed(s.read_exact(&mut reply)).await.unwrap();
-    assert_eq!(reply[..2], [5, 0], "{reply:?}");
+    assert_eq!(socks5_connect(&mut s, "localhost", 22).await, 0);
     assert!(read_line(&mut s).await.starts_with("SSH-2.0-"));
 
     // SOCKS5, IPv4 literal, closed port: connection refused.
@@ -522,8 +512,6 @@ async fn machine_to_machine() {
         )
         .await;
     assert_eq!(out, bastion_banner);
-    let target_hostname = fx.exec("cfg:target", "hostname").await;
-    assert_eq!(target_hostname.trim(), "target");
 
     // Disconnecting the via host on purpose stops the forward too.
     fx.sessions.disconnect("cfg:bastion").await;

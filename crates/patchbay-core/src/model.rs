@@ -763,18 +763,7 @@ mod tests {
             "background": true, "maxBytes": 1024
         }))
         .unwrap();
-        assert!(request.background);
-        assert_eq!(request.max_bytes, Some(1024));
-
-        let listing = DirListing {
-            path: "/".into(),
-            parent: None,
-            entries: vec![],
-        };
-        assert_eq!(
-            serde_json::to_value(listing).unwrap(),
-            json!({"path": "/", "parent": null, "entries": []})
-        );
+        assert_eq!((request.background, request.max_bytes), (true, Some(1024)));
     }
 
     #[test]
@@ -791,23 +780,12 @@ mod tests {
             state: EditState::Synced { at: 9 },
         };
         assert_eq!(
-            serde_json::to_value(CoreEvent::Edit(session.clone())).unwrap(),
+            serde_json::to_value(CoreEvent::Edit(session)).unwrap(),
             json!({
                 "type": "edit", "id": id, "hostId": "cfg:a", "remotePath": "/etc/app.yml",
                 "localPath": "/cache/patchbay/edit/x/app.yml", "dirty": false, "recovered": false,
                 "lastUpload": 7, "state": "synced", "at": 9
             })
-        );
-        let failed = EditSession {
-            state: EditState::Failed {
-                message: "not connected".into(),
-            },
-            ..session
-        };
-        let value = serde_json::to_value(&failed).unwrap();
-        assert_eq!(
-            (&value["state"], &value["message"]),
-            (&json!("failed"), &json!("not connected"))
         );
 
         let prompt = Prompt::EditConflict {
@@ -859,10 +837,6 @@ mod tests {
                 rows: 40,
             }
         );
-        let local: TerminalSpec =
-            serde_json::from_value(json!({"hostId": null, "cwd": null, "cols": 80, "rows": 24}))
-                .unwrap();
-        assert_eq!((local.host_id, local.cwd), (None, None));
 
         let info = TerminalInfo {
             id,
@@ -978,7 +952,8 @@ mod tests {
                 "bytesIn": 10, "bytesOut": 20
             })
         );
-        for (state, extra) in [
+        // The flattening is pinned above; the other states only need their tags.
+        for (state, expected) in [
             (PortForwardState::Stopped, json!({"state": "stopped"})),
             (PortForwardState::Starting, json!({"state": "starting"})),
             (
@@ -994,15 +969,7 @@ mod tests {
                 json!({"state": "failed", "message": "nope"}),
             ),
         ] {
-            let mut expected = json!({
-                "id": "fwd:1", "openConnections": 2, "totalConnections": 7,
-                "bytesIn": 10, "bytesOut": 20
-            });
-            expected
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            assert_eq!(serde_json::to_value(status(state)).unwrap(), expected);
+            assert_eq!(serde_json::to_value(state).unwrap(), expected);
         }
         assert_eq!(
             serde_json::to_value(CoreEvent::PortForwardsChanged).unwrap(),

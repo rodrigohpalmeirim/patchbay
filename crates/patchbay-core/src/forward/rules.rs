@@ -454,173 +454,116 @@ mod tests {
 
     #[test]
     fn validation_normalizes() {
-        let rule = validate(
-            PortForwardDraft {
-                name: "  web ".into(),
-                bind_address: Some(" [::1] ".into()),
-                target_host: Some(" [fe80::1%eth0] ".into()),
-                ..draft(PortForwardKind::Local)
-            },
-            known,
-        )
-        .unwrap();
+        let ok = |d| validate(d, known).unwrap();
+        let rule = ok(PortForwardDraft {
+            name: "  web ".into(),
+            bind_address: Some(" [::1] ".into()),
+            target_host: Some(" [fe80::1%eth0] ".into()),
+            ..draft(PortForwardKind::Local)
+        });
         assert_eq!(rule.name, "web");
         assert_eq!(rule.bind_address.as_deref(), Some("::1"));
         assert_eq!(rule.target_host.as_deref(), Some("fe80::1%eth0"));
 
-        let rule = validate(draft(PortForwardKind::Local), known).unwrap();
+        let rule = ok(draft(PortForwardKind::Local));
         assert_eq!(rule.name, "L 8080 → localhost:80");
         assert_eq!(rule.bind_address, None);
 
-        let rule = validate(
-            PortForwardDraft {
-                bind_address: Some("*".into()),
-                bind_port: 0,
-                ..draft(PortForwardKind::Dynamic)
-            },
-            known,
-        )
-        .unwrap();
+        let rule = ok(PortForwardDraft {
+            bind_address: Some("*".into()),
+            bind_port: 0,
+            ..draft(PortForwardKind::Dynamic)
+        });
         assert_eq!((rule.target_host, rule.target_port), (None, None));
         assert_eq!(rule.name, "D *:0");
 
-        let rule = validate(
-            PortForwardDraft {
-                via_host_id: Some("app:b".into()),
-                bind_address: Some("0.0.0.0".into()),
-                ..draft(PortForwardKind::Remote)
-            },
-            known,
-        )
-        .unwrap();
+        let rule = ok(PortForwardDraft {
+            via_host_id: Some("app:b".into()),
+            bind_address: Some("0.0.0.0".into()),
+            ..draft(PortForwardKind::Remote)
+        });
         assert_eq!(rule.name, "R 0.0.0.0:8080 → localhost:80 via app:b");
 
-        let rule = validate(
-            PortForwardDraft {
-                via_host_id: Some("  ".into()),
-                ..draft(PortForwardKind::Remote)
-            },
-            known,
-        )
-        .unwrap();
+        // A SOCKS proxy on the server, going online from another host.
+        let rule = ok(PortForwardDraft {
+            via_host_id: Some("app:b".into()),
+            ..draft(PortForwardKind::RemoteDynamic)
+        });
+        assert_eq!((rule.target_host, rule.target_port), (None, None));
+        assert_eq!(rule.name, "R 8080 SOCKS via app:b");
+
+        let rule = ok(PortForwardDraft {
+            via_host_id: Some("  ".into()),
+            ..draft(PortForwardKind::Remote)
+        });
         assert_eq!(rule.via_host_id, None);
+        // Only remote listeners need a fixed port.
+        ok(PortForwardDraft {
+            bind_port: 0,
+            ..draft(PortForwardKind::Local)
+        });
     }
 
     #[test]
     fn validation_rejects() {
         use PortForwardKind::*;
-        assert!(matches!(
-            validate(
-                PortForwardDraft {
-                    host_id: "cfg:nope".into(),
-                    ..draft(Local)
-                },
-                known
+        type Edit = fn(&mut PortForwardDraft);
+        let cases: [(&[PortForwardKind], Edit, &str); 9] = [
+            (&[Local], |d| d.host_id = " ".into(), "Choose the SSH host"),
+            (
+                &[Local, Remote],
+                |d| d.target_host = Some(" ".into()),
+                "Destination host is required",
             ),
-            Err(Error::UnknownHost(_))
-        ));
-        assert!(
-            err(PortForwardDraft {
-                host_id: " ".into(),
-                ..draft(Local)
-            })
-            .contains("host")
-        );
-        for kind in [Local, Remote] {
-            assert!(
-                err(PortForwardDraft {
-                    target_host: Some(" ".into()),
-                    ..draft(kind)
-                })
-                .contains("Destination host is required")
-            );
-            assert!(
-                err(PortForwardDraft {
-                    target_port: None,
-                    ..draft(kind)
-                })
-                .contains("Destination port is required")
-            );
-            assert!(
-                err(PortForwardDraft {
-                    target_port: Some(0),
-                    ..draft(kind)
-                })
-                .contains("between 1 and 65535")
-            );
-        }
-        for kind in [Remote, RemoteDynamic] {
-            assert!(
-                err(PortForwardDraft {
-                    bind_port: 0,
-                    ..draft(kind)
-                })
-                .contains("listen port")
-            );
-        }
-        assert!(
-            validate(
-                PortForwardDraft {
-                    bind_port: 0,
-                    ..draft(Local)
-                },
-                known
-            )
-            .is_ok()
-        );
-        for kind in [Local, Dynamic] {
-            assert!(
-                err(PortForwardDraft {
-                    via_host_id: Some("app:b".into()),
-                    ..draft(kind)
-                })
-                .contains("Only forwards that listen on a server")
-            );
-        }
-        for kind in [Remote, RemoteDynamic] {
-            assert!(
-                err(PortForwardDraft {
-                    via_host_id: Some("cfg:a".into()),
-                    ..draft(kind)
-                })
-                .contains("must differ")
-            );
-        }
-        // A SOCKS proxy on the server, going online from another host.
-        let rule = validate(
-            PortForwardDraft {
-                via_host_id: Some("app:b".into()),
-                ..draft(RemoteDynamic)
-            },
-            known,
-        )
-        .unwrap();
-        assert_eq!((rule.target_host, rule.target_port), (None, None));
-        assert_eq!(rule.name, "R 8080 SOCKS via app:b");
-        assert!(matches!(
-            validate(
-                PortForwardDraft {
-                    via_host_id: Some("app:zzz".into()),
-                    ..draft(Remote)
-                },
-                known
+            (
+                &[Local, Remote],
+                |d| d.target_port = None,
+                "Destination port is required",
             ),
-            Err(Error::UnknownHost(id)) if id == "app:zzz"
-        ));
-        assert!(
-            err(PortForwardDraft {
-                bind_address: Some("a b".into()),
-                ..draft(Local)
-            })
-            .contains("Listen address")
-        );
-        assert!(
-            err(PortForwardDraft {
-                target_host: Some("*".into()),
-                ..draft(Local)
-            })
-            .contains("Destination host")
-        );
+            (
+                &[Local, Remote],
+                |d| d.target_port = Some(0),
+                "between 1 and 65535",
+            ),
+            (&[Remote, RemoteDynamic], |d| d.bind_port = 0, "listen port"),
+            (
+                &[Local, Dynamic],
+                |d| d.via_host_id = Some("app:b".into()),
+                "Only forwards that listen on a server",
+            ),
+            (
+                &[Remote, RemoteDynamic],
+                |d| d.via_host_id = Some("cfg:a".into()),
+                "must differ",
+            ),
+            (
+                &[Local],
+                |d| d.bind_address = Some("a b".into()),
+                r#"Listen address "a b" is not"#,
+            ),
+            (
+                &[Local],
+                |d| d.target_host = Some("*".into()),
+                r#"Destination host "*" is not"#,
+            ),
+        ];
+        for (kinds, edit, expected) in cases {
+            for &kind in kinds {
+                let mut d = draft(kind);
+                edit(&mut d);
+                let e = err(d);
+                assert!(e.contains(expected), "{kind:?}: {e}");
+            }
+        }
+
+        for (edit, unknown) in [
+            ((|d| d.host_id = "cfg:nope".into()) as Edit, "cfg:nope"),
+            (|d| d.via_host_id = Some("app:zzz".into()), "app:zzz"),
+        ] {
+            let mut d = draft(Remote);
+            edit(&mut d);
+            assert!(matches!(validate(d, known), Err(Error::UnknownHost(id)) if id == unknown));
+        }
     }
 
     #[test]

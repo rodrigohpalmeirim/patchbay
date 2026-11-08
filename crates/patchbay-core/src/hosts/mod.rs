@@ -1952,36 +1952,19 @@ mod tests {
              Host plain\n",
         );
         let store = f.store();
-        let methods = |alias: &str| {
-            store
+        // (publickey, keyboard-interactive, password)
+        for (alias, want) in [
+            ("nokeys", (false, true, true)),
+            ("keysonly", (true, false, false)),
+            ("preferred", (false, true, true)),
+            ("plain", (true, true, true)),
+        ] {
+            let m = store
                 .resolve_target(&format!("cfg:{alias}"))
                 .unwrap()
-                .auth_methods
-        };
-        assert_eq!(
-            methods("nokeys"),
-            AuthMethods {
-                publickey: false,
-                keyboard_interactive: true,
-                password: true
-            }
-        );
-        assert_eq!(
-            methods("keysonly"),
-            AuthMethods {
-                publickey: true,
-                keyboard_interactive: false,
-                password: false
-            }
-        );
-        assert_eq!(
-            methods("preferred"),
-            AuthMethods {
-                publickey: false,
-                keyboard_interactive: true,
-                password: true
-            }
-        );
-        assert_eq!(methods("plain"), AuthMethods::default());
+                .auth_methods;
+            let got = (m.publickey, m.keyboard_interactive, m.password);
+            assert_eq!(got, want, "{alias}");
+        }
     }
 }

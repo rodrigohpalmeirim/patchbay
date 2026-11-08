@@ -422,6 +422,21 @@ mod tests {
             self.terminals.write(id, text.as_bytes().to_vec()).unwrap();
         }
 
+        /// Runs `echo {word}` and receives until `{word}\r\n` arrives.
+        async fn echo(
+            &self,
+            id: Uuid,
+            rx: &mut mpsc::UnboundedReceiver<InvokeResponseBody>,
+            word: &str,
+        ) {
+            self.write(id, &format!("echo {word}\n"));
+            let line = format!("{word}\r\n");
+            receive_until(rx, &mut Vec::new(), |s| {
+                String::from_utf8_lossy(s).contains(&line)
+            })
+            .await;
+        }
+
         async fn exit(&mut self, id: Uuid) -> Option<i32> {
             loop {
                 if let CoreEvent::TerminalExit {
@@ -527,14 +542,7 @@ mod tests {
     async fn cancelling_a_webview_closes_its_terminals() {
         let mut fx = Fixture::new();
         let (id, mut rx) = fx.open().await;
-        fx.write(id, "echo ready\n");
-        timed(async {
-            let mut seen = Vec::new();
-            while !String::from_utf8_lossy(&seen).contains("ready\r\n") {
-                seen.extend(raw(rx.recv().await.unwrap()));
-            }
-        })
-        .await;
+        fx.echo(id, &mut rx, "ready").await;
         assert_eq!(fx.streams.cancel_webview("other", true), Vec::<Uuid>::new());
         assert_eq!(fx.streams.cancel_webview("main", false), vec![id]);
         timed(fx.exit(id)).await;
@@ -721,12 +729,7 @@ mod tests {
     async fn failed_handovers_are_undone_or_expire() {
         let mut fx = Fixture::new();
         let (id, mut a) = fx.open().await;
-        fx.write(id, "echo one\n");
-        let mut seen = Vec::new();
-        receive_until(&mut a, &mut seen, |s| {
-            String::from_utf8_lossy(s).contains("one\r\n")
-        })
-        .await;
+        fx.echo(id, &mut a, "one").await;
 
         // Taken back before the target attached: the source resumes.
         fx.streams.pause(id, "main").unwrap();
@@ -734,11 +737,7 @@ mod tests {
         assert!(!fx.streams.resume(id, "main"));
         assert!(fx.streams.reclaim(id, "main", "target"));
         assert!(fx.streams.resume(id, "main"));
-        fx.write(id, "echo two\n");
-        receive_until(&mut a, &mut seen, |s| {
-            String::from_utf8_lossy(s).contains("two\r\n")
-        })
-        .await;
+        fx.echo(id, &mut a, "two").await;
 
         // The target never attaches: the handover expires and the terminal
         // closes.
@@ -752,12 +751,7 @@ mod tests {
 
         // Closing the target window cancels what was handed to it.
         let (id, mut a) = fx.open().await;
-        fx.write(id, "echo ready\n");
-        let mut seen = Vec::new();
-        receive_until(&mut a, &mut seen, |s| {
-            String::from_utf8_lossy(s).contains("ready\r\n")
-        })
-        .await;
+        fx.echo(id, &mut a, "ready").await;
         fx.streams.pause(id, "main").unwrap();
         fx.streams.hand_over(id, "main", "target").unwrap();
         assert!(fx.streams.cancel_webview("main", true).is_empty());
