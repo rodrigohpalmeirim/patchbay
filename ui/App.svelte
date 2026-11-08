@@ -8,6 +8,7 @@
   import Toasts from "./lib/components/Toasts.svelte";
   import TransfersPanel from "./lib/components/TransfersPanel.svelte";
   import Workspace from "./lib/components/Workspace.svelte";
+  import WindowControls from "./lib/components/WindowControls.svelte";
   import EditConflictDialog from "./lib/dialogs/EditConflictDialog.svelte";
   import FileConflictDialog from "./lib/dialogs/FileConflictDialog.svelte";
   import PermissionsDialog from "./lib/dialogs/PermissionsDialog.svelte";
@@ -31,7 +32,7 @@
   import { ui } from "./lib/stores/ui.svelte";
   import { windows } from "./lib/stores/windows.svelte";
   import { toCommandError } from "./lib/util/errors";
-  import { hasMod, isEditable, isMac } from "./lib/util/platform";
+  import { customTitlebar, hasMod, isEditable, isMac } from "./lib/util/platform";
   import { inTerminal, isNewTerminalKey } from "./lib/terminal/keys";
   import { newTerminalForActive } from "./lib/terminal/ops";
   import { focusTabPanel } from "./lib/tabFocus";
@@ -141,11 +142,20 @@
   <main class="main" data-window-drop>
     {#if tabs.list.length > 0}
       <Workspace />
-    {:else if !session.pending}
-      <Welcome />
+    {:else}
+      {#if customTitlebar}
+        <!-- No tab strip to drag the window by. -->
+        <div class="drag-bar" data-tauri-drag-region></div>
+      {/if}
+      {#if !session.pending}
+        <Welcome />
+      {/if}
     {/if}
     <TransfersPanel />
   </main>
+  {#if customTitlebar}
+    <WindowControls />
+  {/if}
 </div>
 
 {#if prompts.current}
@@ -207,10 +217,19 @@
     min-width: 0;
   }
   .main {
+    position: relative;
     display: flex;
     flex-direction: column;
     flex: 1;
     min-width: 0;
     background: var(--bg);
+  }
+  .drag-bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: var(--window-controls-w);
+    height: var(--tabstrip-h);
+    z-index: 1;
   }
 </style>

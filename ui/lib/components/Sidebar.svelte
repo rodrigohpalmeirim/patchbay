@@ -237,7 +237,7 @@
   inert={!ui.sidebarOpen}
   aria-label="Hosts sidebar"
 >
-  <header class="head">
+  <header class="head" data-tauri-drag-region>
     <div class="search">
       <Search size={14} class="search-icon" />
       <input

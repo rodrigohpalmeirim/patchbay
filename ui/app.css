@@ -46,6 +46,8 @@
   --control-h-sm: 26px;
   --sidebar-w: 260px;
   --tabstrip-h: 40px;
+  /* Room for WindowControls at the end of the top-right tab strip. */
+  --window-controls-w: 0px;
 
   /* Motion */
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -515,4 +517,8 @@ kbd {
   .spin {
     animation: spin 1.6s linear infinite !important;
   }
+}
+
+:root.custom-titlebar {
+  --window-controls-w: 138px;
 }

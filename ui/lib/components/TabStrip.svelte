@@ -30,8 +30,16 @@
   import { tabDef } from "../views/tabKinds";
   import StatusDot from "./StatusDot.svelte";
 
-  /** `sidebarButton`: the sidebar is hidden and this strip is the top-left one, so it can bring it back. */
-  let { group, focused = false, sidebarButton = false }: { group: string; focused?: boolean; sidebarButton?: boolean } = $props();
+  /**
+   * `sidebarButton`: the sidebar is hidden and this strip is the top-left one, so it can bring it back.
+   * `windowControls`: this strip is the top-right one, under the window's minimize / maximize / close buttons.
+   */
+  let {
+    group,
+    focused = false,
+    sidebarButton = false,
+    windowControls = false,
+  }: { group: string; focused?: boolean; sidebarButton?: boolean; windowControls?: boolean } = $props();
 
   let strip = $state<HTMLElement>();
   const list = $derived(tabs.tabsIn(group));
@@ -168,7 +176,8 @@
   });
 </script>
 
-<div class="bar" class:focused data-strip-group={group}>
+<!-- The strip's empty parts move the window (`data-tauri-drag-region` only applies to the element itself). -->
+<div class="bar" class:focused class:window-controls={windowControls} data-strip-group={group} data-tauri-drag-region>
   {#if sidebarButton}
     <!-- Outside the scrolling tabs, so they never pass under it. -->
     <span class="sidebar-slot">
@@ -177,7 +186,7 @@
       </button>
     </span>
   {/if}
-  <div class="strip" class:after-button={sidebarButton} bind:this={strip} role="tablist" aria-label={tabs.isSplit ? "Tab group" : "Open tabs"}>
+  <div class="strip" class:after-button={sidebarButton} bind:this={strip} role="tablist" aria-label={tabs.isSplit ? "Tab group" : "Open tabs"} data-tauri-drag-region>
     {#each list as tab (tab.id)}
       {@const host = hosts.get(tab.hostId)}
       {@const def = tabDef(tab)}
@@ -228,7 +237,7 @@
     <button type="button" class="new icon-btn" aria-label="New tab" aria-haspopup="menu" title="New terminal or files tab" onclick={newMenu}>
       <Plus size={15} />
     </button>
-    <span class="rest" aria-hidden="true"></span>
+    <span class="rest" aria-hidden="true" data-tauri-drag-region></span>
   </div>
 </div>
 
@@ -239,6 +248,9 @@
     border-bottom: 1px solid var(--border);
     background: var(--bg-sidebar);
     flex: none;
+  }
+  .bar.window-controls {
+    padding-right: var(--window-controls-w);
   }
   .strip {
     display: flex;
