@@ -28,6 +28,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, broadcast, mpsc};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long [`Fx::settled`] waits for events still on their way.
+const EVENT_SETTLE: Duration = Duration::from_secs(5);
 
 macro_rules! require_docker {
     () => {
@@ -194,6 +196,22 @@ impl Fx {
             .collect()
     }
 
+    /// `read(self)` once `done` holds for it, or after [`EVENT_SETTLE`]
+    /// either way, for the caller to assert on (so a failure shows what
+    /// arrived). Events reach [`Fx::events`] through a task of their own, so
+    /// the latest ones may still be on their way when the action that sent
+    /// them returns.
+    async fn settled<T>(&self, read: impl Fn(&Self) -> T, done: impl Fn(&T) -> bool) -> T {
+        let deadline = tokio::time::Instant::now() + EVENT_SETTLE;
+        loop {
+            let value = read(self);
+            if done(&value) || tokio::time::Instant::now() >= deadline {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     fn prompt_count(&self) -> usize {
         self.prompts.lock().unwrap().len()
     }
@@ -356,8 +374,14 @@ async fn local_forward_reaches_sshd() {
         TcpStream::connect(&address).await.is_err(),
         "listener closed"
     );
+    let states = fx
+        .settled(
+            |fx| fx.forward_states(&rule.id),
+            |s| s.last() == Some(&PortForwardState::Stopped),
+        )
+        .await;
     assert_eq!(
-        fx.forward_states(&rule.id),
+        states,
         [
             PortForwardState::Starting,
             PortForwardState::Active {
@@ -699,7 +723,12 @@ async fn reconnects_after_connection_loss() {
         .await;
     assert_eq!(out, "again", "remote forward re-established");
 
-    let states = fx.forward_states(&local.id);
+    let states = fx
+        .settled(
+            |fx| fx.forward_states(&local.id),
+            |s| matches!(s.last(), Some(PortForwardState::Active { .. })),
+        )
+        .await;
     assert!(
         matches!(
             states.as_slice(),
@@ -760,10 +789,19 @@ async fn reconnect_asks_once_and_cancel_fails() {
         matches!(&s.state, PortForwardState::Failed { message } if message.contains("cancelled")),
         "{s:?}"
     );
-    assert!(matches!(
-        fx.connection_states("cfg:target-pw").last(),
-        Some(ConnectionState::Disconnected { reason: Some(_) })
-    ));
+    let states = fx
+        .settled(
+            |fx| fx.connection_states("cfg:target-pw"),
+            |s| matches!(s.last(), Some(ConnectionState::Disconnected { .. })),
+        )
+        .await;
+    assert!(
+        matches!(
+            states.last(),
+            Some(ConnectionState::Disconnected { reason: Some(_) })
+        ),
+        "{states:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

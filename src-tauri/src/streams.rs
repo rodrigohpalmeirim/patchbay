@@ -592,10 +592,21 @@ mod tests {
         find(output, START).map(|i| i + START.len())
     }
 
-    /// Exactly what `seq 1 lines` prints to a terminal.
+    /// `seq 1 lines` with the terminal's newline translation (`onlcr`) off
+    /// while it runs. With it on, the macOS pty driver sometimes writes
+    /// `\r\r\n`: when its output queue fills up between the `\r` it adds and
+    /// the `\n`, it later retries the whole `\n`, adding the `\r` again. The
+    /// handover test fills that queue on purpose (flow control stalls the
+    /// output), so it would fail now and then. `stty` prints nothing, so the
+    /// marked output is still exactly `seq`'s.
+    fn raw_seq(lines: u64) -> String {
+        format!("stty -onlcr; seq 1 {lines}; stty onlcr")
+    }
+
+    /// Exactly what [`raw_seq`] prints to a terminal.
     fn seq_output(lines: u64) -> Vec<u8> {
         (1..=lines)
-            .flat_map(|n| format!("{n}\r\n").into_bytes())
+            .flat_map(|n| format!("{n}\n").into_bytes())
             .collect()
     }
 
@@ -612,7 +623,7 @@ mod tests {
         let mut fx = Fixture::new();
         let (id, mut a) = fx.open().await;
         let shell = fx.terminals.list().first().map(|t| t.shell.clone());
-        let command = marked(&format!("seq 1 {LINES}"));
+        let command = marked(&raw_seq(LINES));
         fx.write(id, &format!("{command}; exit 0\n"));
 
         // The source gets some of it, then pauses: what it has received by
