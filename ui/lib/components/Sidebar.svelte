@@ -455,7 +455,8 @@
     align-items: center;
     gap: 6px;
     height: var(--tabstrip-h);
-    padding: 0 8px 0 10px;
+    /* Pushed down a little: it is the top of the window, and in line with the tabs. */
+    padding: 6px 8px 0 10px;
     flex: none;
   }
   .spacer {
