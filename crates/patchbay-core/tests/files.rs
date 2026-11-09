@@ -817,7 +817,7 @@ async fn search_with_find_and_walk() {
     // Cancelling sends a final event.
     let id = h.search.start(Some(TARGET.into()), "/", "e").await.unwrap();
     h.search.cancel(id);
-    let done = timed(async {
+    timed(async {
         loop {
             if let Ok(CoreEvent::Search {
                 search_id,
@@ -826,12 +826,11 @@ async fn search_with_find_and_walk() {
             }) = h.events.recv().await
                 && search_id == id
             {
-                return true;
+                return;
             }
         }
     })
     .await;
-    assert!(done);
 }
 
 /// Throughput of naive (one request in flight) vs pipelined SFTP. Set
@@ -893,53 +892,38 @@ async fn bench_throughput() {
         rate(naive_bytes, naive)
     );
 
-    let started = Instant::now();
-    let info = h
-        .copy(
-            vec![remote(TARGET, "/home/patchbay/big.bin")],
-            local(&h.local("")),
-        )
-        .await;
-    assert_eq!(info.state, TransferState::Done);
-    let t = started.elapsed();
-    eprintln!(
-        "patchbay download   20 MiB: {t:>10.2?}  {}",
-        rate(20 << 20, t)
-    );
-
-    let started = Instant::now();
-    let info = h
-        .copy(vec![local(&h.local("big.bin"))], remote(TARGET, &dir))
-        .await;
-    assert_eq!(info.state, TransferState::Done);
-    let t = started.elapsed();
-    eprintln!(
-        "patchbay upload     20 MiB: {t:>10.2?}  {}",
-        rate(20 << 20, t)
-    );
-
-    let started = Instant::now();
-    let info = h
-        .copy(vec![remote(TARGET, &large)], local(&h.local("")))
-        .await;
-    assert_eq!(info.state, TransferState::Done);
-    let t = started.elapsed();
-    eprintln!(
-        "patchbay download {mb:>4} MiB: {t:>10.2?}  {}",
-        rate(mb << 20, t)
-    );
-
     let up = scratch_dir(&h, "bench-up").await;
-    let started = Instant::now();
-    let info = h
-        .copy(vec![local(&h.local("large.bin"))], remote(TARGET, &up))
-        .await;
-    assert_eq!(info.state, TransferState::Done);
-    let t = started.elapsed();
-    eprintln!(
-        "patchbay upload   {mb:>4} MiB: {t:>10.2?}  {}",
-        rate(mb << 20, t)
-    );
+    let runs = [
+        (
+            "download",
+            20,
+            remote(TARGET, "/home/patchbay/big.bin"),
+            local(&h.local("")),
+        ),
+        (
+            "upload  ",
+            20,
+            local(&h.local("big.bin")),
+            remote(TARGET, &dir),
+        ),
+        ("download", mb, remote(TARGET, &large), local(&h.local(""))),
+        (
+            "upload  ",
+            mb,
+            local(&h.local("large.bin")),
+            remote(TARGET, &up),
+        ),
+    ];
+    for (what, mib, source, destination) in runs {
+        let started = Instant::now();
+        let info = h.copy(vec![source], destination).await;
+        assert_eq!(info.state, TransferState::Done);
+        let t = started.elapsed();
+        eprintln!(
+            "patchbay {what} {mib:>4} MiB: {t:>10.2?}  {}",
+            rate(mib << 20, t)
+        );
+    }
 
     h.fs.delete(Some(TARGET), &[dir, up]).await.unwrap();
 }

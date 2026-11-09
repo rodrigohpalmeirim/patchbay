@@ -288,6 +288,7 @@ fn hashed_matches(field: &str, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::HostKeyStatus::*;
     use super::*;
 
     const ED_A: &str =
@@ -325,6 +326,14 @@ mod tests {
         );
     }
 
+    /// Checks each `(host, port, key, expected)` against `files`.
+    fn expect(files: &[PathBuf], cases: &[(&str, u16, &str, HostKeyStatus)]) {
+        for (host, port, k, want) in cases {
+            let got = check(files, host, *port, &key(k)).unwrap();
+            assert_eq!(&got, want, "{host}:{port}");
+        }
+    }
+
     #[test]
     fn hashed_entry_from_ssh_keygen() {
         let dir = tempfile::tempdir().unwrap();
@@ -333,14 +342,12 @@ mod tests {
             "kh",
             &format!("|1|A5d3ESYm9FIkh9r4X+j7K8Z/94E=|F+qlhaItJygZnTqHvZ3/S+D4MOE= {ED_A}\n"),
         );
-        let files = [f];
-        assert_eq!(
-            check(&files, "host.example", 2200, &key(ED_A)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "host.example", 22, &key(ED_A)).unwrap(),
-            HostKeyStatus::Unknown
+        expect(
+            &[f],
+            &[
+                ("host.example", 2200, ED_A, Known),
+                ("host.example", 22, ED_A, Unknown),
+            ],
         );
     }
 
@@ -352,44 +359,22 @@ mod tests {
             "kh",
             &format!("# comment\n\nexample.com,10.0.0.1 {ED_A} c\n[example.com]:2222 {ED_B}\n"),
         );
-        let files = [dir.path().join("missing"), f.clone()];
-        assert_eq!(
-            check(&files, "example.com", 22, &key(ED_A)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "EXAMPLE.com", 22, &key(ED_A)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "10.0.0.1", 22, &key(ED_A)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "example.com", 22, &key(ED_B)).unwrap(),
-            HostKeyStatus::Changed {
-                file: f.clone(),
-                line: 3
-            }
-        );
-        assert_eq!(
-            check(&files, "example.com", 2222, &key(ED_B)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "example.com", 2222, &key(ED_A)).unwrap(),
-            HostKeyStatus::Changed {
-                file: f.clone(),
-                line: 4
-            }
-        );
-        assert_eq!(
-            check(&files, "other", 22, &key(ED_A)).unwrap(),
-            HostKeyStatus::Unknown
-        );
-        assert_eq!(
-            check(&files, "example.com", 22, &key(ECDSA)).unwrap(),
-            HostKeyStatus::Unknown
+        let changed = |line| Changed {
+            file: f.clone(),
+            line,
+        };
+        expect(
+            &[dir.path().join("missing"), f.clone()],
+            &[
+                ("example.com", 22, ED_A, Known),
+                ("EXAMPLE.com", 22, ED_A, Known),
+                ("10.0.0.1", 22, ED_A, Known),
+                ("example.com", 22, ED_B, changed(3)),
+                ("example.com", 2222, ED_B, Known),
+                ("example.com", 2222, ED_A, changed(4)),
+                ("other", 22, ED_A, Unknown),
+                ("example.com", 22, ECDSA, Unknown),
+            ],
         );
     }
 
@@ -405,22 +390,22 @@ mod tests {
                 hashed("[host.example]:2200", b"jihgfedcba9876543210"),
             ),
         );
-        let files = [f.clone()];
-        assert_eq!(
-            check(&files, "host.example", 22, &key(ED_A)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "host.example", 2200, &key(ED_A)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "host.example", 22, &key(ED_B)).unwrap(),
-            HostKeyStatus::Changed { file: f, line: 1 }
-        );
-        assert_eq!(
-            check(&files, "host.example", 2201, &key(ED_A)).unwrap(),
-            HostKeyStatus::Unknown
+        expect(
+            std::slice::from_ref(&f),
+            &[
+                ("host.example", 22, ED_A, Known),
+                ("host.example", 2200, ED_A, Known),
+                (
+                    "host.example",
+                    22,
+                    ED_B,
+                    Changed {
+                        file: f.clone(),
+                        line: 1,
+                    },
+                ),
+                ("host.example", 2201, ED_A, Unknown),
+            ],
         );
     }
 
@@ -436,29 +421,24 @@ mod tests {
             ),
         );
         let f2 = write(dir.path(), "b", &format!("web.corp {ED_B}\n"));
-        let files = [f1.clone(), f2.clone()];
-        assert_eq!(
-            check(&files, "web.corp", 22, &key(ED_A)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "web.corp", 22, &key(ED_B)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "secret.corp", 22, &key(ED_A)).unwrap(),
-            HostKeyStatus::Unknown
-        );
-        assert_eq!(
-            check(&files, "db.corp", 22, &key(ED_B)).unwrap(),
-            HostKeyStatus::Changed {
-                file: f1.clone(),
-                line: 1
-            }
-        );
-        assert_eq!(
-            check(&files, "anything", 22, &key(ECDSA)).unwrap(),
-            HostKeyStatus::Revoked { file: f1, line: 3 }
+        let file = f1.clone();
+        expect(
+            &[f1, f2],
+            &[
+                ("web.corp", 22, ED_A, Known),
+                ("web.corp", 22, ED_B, Known),
+                ("secret.corp", 22, ED_A, Unknown),
+                (
+                    "db.corp",
+                    22,
+                    ED_B,
+                    Changed {
+                        file: file.clone(),
+                        line: 1,
+                    },
+                ),
+                ("anything", 22, ECDSA, Revoked { file, line: 3 }),
+            ],
         );
     }
 
@@ -508,14 +488,12 @@ mod tests {
             text,
             format!("host.example {ED_A}\n[host.example]:2222 {ECDSA}\n")
         );
-        let files = [file.clone()];
-        assert_eq!(
-            check(&files, "host.example", 22, &key(ED_A)).unwrap(),
-            HostKeyStatus::Known
-        );
-        assert_eq!(
-            check(&files, "host.example", 2222, &key(ECDSA)).unwrap(),
-            HostKeyStatus::Known
+        expect(
+            std::slice::from_ref(&file),
+            &[
+                ("host.example", 22, ED_A, Known),
+                ("host.example", 2222, ECDSA, Known),
+            ],
         );
 
         #[cfg(unix)]

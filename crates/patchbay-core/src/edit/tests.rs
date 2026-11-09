@@ -121,8 +121,9 @@ async fn saves_are_uploaded() {
         fs::set_permissions(&remote, fs::Permissions::from_mode(0o640)).unwrap();
     }
     let s = h.open(&remote).await;
+    let edit_root = h.dir.path().join("edit");
     assert_eq!(local(&s).file_name().unwrap(), "config.yml");
-    assert!(local(&s).starts_with(h.dir.path().join("edit").join(s.id.to_string())));
+    assert!(local(&s).starts_with(edit_root.join(s.id.to_string())));
     assert_eq!(fs::read(local(&s)).unwrap(), b"a: 1\n");
     assert!(matches!(s.state, EditState::Synced { .. }));
     assert_eq!((s.dirty, s.last_upload), (false, None));
@@ -155,13 +156,7 @@ async fn saves_are_uploaded() {
     assert_eq!(h.edits.close(s.id, false).await.unwrap(), None);
     h.wait(s.id, |s| s.state == EditState::Closed).await;
     assert!(!local(&s).exists());
-    assert!(
-        !h.dir
-            .path()
-            .join("edit")
-            .join(format!("{}.json", s.id))
-            .exists()
-    );
+    assert!(!edit_root.join(format!("{}.json", s.id)).exists());
     assert!(h.edits.list().is_empty());
 }
 
@@ -350,30 +345,26 @@ async fn symlinks_are_edited_through() {
 
 #[test]
 fn file_system_events_that_matter() {
-    use notify::event::{CreateKind, RenameMode};
-    let event = |kind, path: &str| notify::Event::new(kind).add_path(PathBuf::from(path));
-    let relevant = |e: &notify::Event| is_relevant(e, "a.txt");
-    assert!(relevant(&event(
-        EventKind::Access(AccessKind::Close(AccessMode::Write)),
-        "/d/a.txt"
-    )));
-    assert!(relevant(&event(
-        EventKind::Modify(ModifyKind::Name(RenameMode::To)),
-        "/d/a.txt"
-    )));
-    assert!(relevant(&event(
-        EventKind::Create(CreateKind::File),
-        "/d/a.txt"
-    )));
-    assert!(!relevant(&event(
-        EventKind::Access(AccessKind::Open(AccessMode::Read)),
-        "/d/a.txt"
-    )));
-    assert!(!relevant(&event(
-        EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
-        "/d/.a.txt.swp"
-    )));
-    assert!(relevant(&notify::Event::new(EventKind::Any)));
+    use EventKind::{Access, Create, Modify};
+    use notify::event::{CreateKind, DataChange, RenameMode};
+    let event = |kind, name: &str| notify::Event::new(kind).add_path(Path::new("/d").join(name));
+    for kind in [
+        Access(AccessKind::Close(AccessMode::Write)),
+        Modify(ModifyKind::Name(RenameMode::To)),
+        Create(CreateKind::File),
+    ] {
+        assert!(is_relevant(&event(kind, "a.txt"), "a.txt"), "{kind:?}");
+    }
+    for kind in [
+        Access(AccessKind::Open(AccessMode::Read)),
+        Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+    ] {
+        assert!(!is_relevant(&event(kind, "a.txt"), "a.txt"), "{kind:?}");
+    }
+    let swap = event(Modify(ModifyKind::Data(DataChange::Any)), ".a.txt.swp");
+    assert!(!is_relevant(&swap, "a.txt"));
+    // No paths: the backend could not tell which file changed.
+    assert!(is_relevant(&notify::Event::new(EventKind::Any), "a.txt"));
 }
 
 #[test]

@@ -114,15 +114,22 @@ impl Harness {
         timed(self.sessions.connect(target)).await.unwrap()
     }
 
-    async fn open(&self, host: Option<&str>, cwd: Option<&str>) -> Term {
-        let (info, out) = timed(self.terminals.open(TerminalSpec {
+    async fn try_open(
+        &self,
+        host: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<(TerminalInfo, TerminalOutput), Error> {
+        timed(self.terminals.open(TerminalSpec {
             host_id: host.map(str::to_owned),
             cwd: cwd.map(str::to_owned),
             cols: 80,
             rows: 24,
         }))
         .await
-        .unwrap();
+    }
+
+    async fn open(&self, host: Option<&str>, cwd: Option<&str>) -> Term {
+        let (info, out) = self.try_open(host, cwd).await.unwrap();
         Term {
             info,
             out: Some(out),
@@ -131,14 +138,7 @@ impl Harness {
     }
 
     async fn open_err(&self, host: Option<&str>, cwd: Option<&str>) -> Error {
-        match timed(self.terminals.open(TerminalSpec {
-            host_id: host.map(str::to_owned),
-            cwd: cwd.map(str::to_owned),
-            cols: 80,
-            rows: 24,
-        }))
-        .await
-        {
+        match self.try_open(host, cwd).await {
             Ok((info, _)) => panic!("opened {info:?}"),
             Err(e) => e,
         }
@@ -307,13 +307,9 @@ fn rss_kib() -> u64 {
 // Local
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread")]
-async fn local_echo_and_exit_code() {
-    let mut h = Harness::new();
-    let mut t = h.open(None, None).await;
-    assert_eq!(t.info.host_id, None);
-    assert_eq!(t.info.shell, "sh");
-    h.write(&t, "echo hi; exit 3\n");
+/// `echo hi; exit 3` prints `hi`, ends the output and reports exit code 3.
+async fn echo_and_exit(h: &mut Harness, t: &mut Term) {
+    h.write(t, "echo hi; exit 3\n");
     let text = plain(&t.drain().await);
     assert!(
         text.lines().any(|l| l == "hi" || l.ends_with("$ hi")),
@@ -322,6 +318,26 @@ async fn local_echo_and_exit_code() {
     assert!(h.terminals.write(t.info.id, b"x".to_vec()).is_err());
     assert!(h.terminals.list().is_empty());
     assert_eq!(h.exit(t.info.id).await, (Some(3), None));
+}
+
+/// `stty size` follows resizes.
+async fn resize(h: &Harness, host: Option<&str>) {
+    let mut t = h.open(host, None).await;
+    h.write(&t, "stty size\n");
+    t.expect_lines(&["24 80"]).await;
+    h.terminals.resize(t.info.id, 132, 43).unwrap();
+    h.write(&t, "stty size\n");
+    t.expect_lines(&["43 132"]).await;
+    h.terminals.close(t.info.id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_echo_and_exit_code() {
+    let mut h = Harness::new();
+    let mut t = h.open(None, None).await;
+    assert_eq!(t.info.host_id, None);
+    assert_eq!(t.info.shell, "sh");
+    echo_and_exit(&mut h, &mut t).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -339,14 +355,7 @@ async fn local_exit_waits_for_the_output_to_be_dropped() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn local_resize() {
-    let h = Harness::new();
-    let mut t = h.open(None, None).await;
-    h.write(&t, "stty size\n");
-    t.expect_lines(&["24 80"]).await;
-    h.terminals.resize(t.info.id, 132, 43).unwrap();
-    h.write(&t, "stty size\n");
-    t.expect_lines(&["43 132"]).await;
-    h.terminals.close(t.info.id).await;
+    resize(&Harness::new(), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -526,13 +535,7 @@ async fn remote_echo_and_exit_code() {
     assert_eq!(t.info.shell, "bash");
     h.write(&t, "echo \"$TERM\"; shopt -q login_shell && echo login\n");
     t.expect_lines(&["xterm-256color", "login"]).await;
-    h.write(&t, "echo hi; exit 3\n");
-    let text = plain(&t.drain().await);
-    assert!(
-        text.lines().any(|l| l == "hi" || l.ends_with("$ hi")),
-        "{text:?}"
-    );
-    assert_eq!(h.exit(t.info.id).await, (Some(3), None));
+    echo_and_exit(&mut h, &mut t).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -582,13 +585,7 @@ async fn remote_resize() {
     require_docker!();
     let h = Harness::new();
     h.connect("test:term-resize", TARGET_PORT).await;
-    let mut t = h.open(Some("test:term-resize"), None).await;
-    h.write(&t, "stty size\n");
-    t.expect_lines(&["24 80"]).await;
-    h.terminals.resize(t.info.id, 132, 43).unwrap();
-    h.write(&t, "stty size\n");
-    t.expect_lines(&["43 132"]).await;
-    h.terminals.close(t.info.id).await;
+    resize(&h, Some("test:term-resize")).await;
 }
 
 /// What a full-screen program prints last (here `top` quitting, then the

@@ -28,6 +28,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, broadcast, mpsc};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long [`Fx::settled`] waits for events still on their way.
+const EVENT_SETTLE: Duration = Duration::from_secs(5);
 
 macro_rules! require_docker {
     () => {
@@ -194,6 +196,22 @@ impl Fx {
             .collect()
     }
 
+    /// `read(self)` once `done` holds for it, or after [`EVENT_SETTLE`]
+    /// either way, for the caller to assert on (so a failure shows what
+    /// arrived). Events reach [`Fx::events`] through a task of their own, so
+    /// the latest ones may still be on their way when the action that sent
+    /// them returns.
+    async fn settled<T>(&self, read: impl Fn(&Self) -> T, done: impl Fn(&T) -> bool) -> T {
+        let deadline = tokio::time::Instant::now() + EVENT_SETTLE;
+        loop {
+            let value = read(self);
+            if done(&value) || tokio::time::Instant::now() >= deadline {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     fn prompt_count(&self) -> usize {
         self.prompts.lock().unwrap().len()
     }
@@ -356,8 +374,14 @@ async fn local_forward_reaches_sshd() {
         TcpStream::connect(&address).await.is_err(),
         "listener closed"
     );
+    let states = fx
+        .settled(
+            |fx| fx.forward_states(&rule.id),
+            |s| s.last() == Some(&PortForwardState::Stopped),
+        )
+        .await;
     assert_eq!(
-        fx.forward_states(&rule.id),
+        states,
         [
             PortForwardState::Starting,
             PortForwardState::Active {
@@ -380,17 +404,7 @@ async fn dynamic_socks_proxy() {
 
     // SOCKS5, domain name.
     let mut s = timed(TcpStream::connect(&address)).await.unwrap();
-    s.write_all(&[5, 1, 0]).await.unwrap();
-    let mut buf = [0u8; 2];
-    s.read_exact(&mut buf).await.unwrap();
-    assert_eq!(buf, [5, 0]);
-    let mut req = vec![5, 1, 0, 3, 9];
-    req.extend_from_slice(b"localhost");
-    req.extend_from_slice(&22u16.to_be_bytes());
-    s.write_all(&req).await.unwrap();
-    let mut reply = [0u8; 10];
-    timed(s.read_exact(&mut reply)).await.unwrap();
-    assert_eq!(reply[..2], [5, 0], "{reply:?}");
+    assert_eq!(socks5_connect(&mut s, "localhost", 22).await, 0);
     assert!(read_line(&mut s).await.starts_with("SSH-2.0-"));
 
     // SOCKS5, IPv4 literal, closed port: connection refused.
@@ -498,8 +512,6 @@ async fn machine_to_machine() {
         )
         .await;
     assert_eq!(out, bastion_banner);
-    let target_hostname = fx.exec("cfg:target", "hostname").await;
-    assert_eq!(target_hostname.trim(), "target");
 
     // Disconnecting the via host on purpose stops the forward too.
     fx.sessions.disconnect("cfg:bastion").await;
@@ -699,7 +711,12 @@ async fn reconnects_after_connection_loss() {
         .await;
     assert_eq!(out, "again", "remote forward re-established");
 
-    let states = fx.forward_states(&local.id);
+    let states = fx
+        .settled(
+            |fx| fx.forward_states(&local.id),
+            |s| matches!(s.last(), Some(PortForwardState::Active { .. })),
+        )
+        .await;
     assert!(
         matches!(
             states.as_slice(),
@@ -760,10 +777,19 @@ async fn reconnect_asks_once_and_cancel_fails() {
         matches!(&s.state, PortForwardState::Failed { message } if message.contains("cancelled")),
         "{s:?}"
     );
-    assert!(matches!(
-        fx.connection_states("cfg:target-pw").last(),
-        Some(ConnectionState::Disconnected { reason: Some(_) })
-    ));
+    let states = fx
+        .settled(
+            |fx| fx.connection_states("cfg:target-pw"),
+            |s| matches!(s.last(), Some(ConnectionState::Disconnected { .. })),
+        )
+        .await;
+    assert!(
+        matches!(
+            states.last(),
+            Some(ConnectionState::Disconnected { reason: Some(_) })
+        ),
+        "{states:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

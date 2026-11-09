@@ -422,6 +422,21 @@ mod tests {
             self.terminals.write(id, text.as_bytes().to_vec()).unwrap();
         }
 
+        /// Runs `echo {word}` and receives until `{word}\r\n` arrives.
+        async fn echo(
+            &self,
+            id: Uuid,
+            rx: &mut mpsc::UnboundedReceiver<InvokeResponseBody>,
+            word: &str,
+        ) {
+            self.write(id, &format!("echo {word}\n"));
+            let line = format!("{word}\r\n");
+            receive_until(rx, &mut Vec::new(), |s| {
+                String::from_utf8_lossy(s).contains(&line)
+            })
+            .await;
+        }
+
         async fn exit(&mut self, id: Uuid) -> Option<i32> {
             loop {
                 if let CoreEvent::TerminalExit {
@@ -527,14 +542,7 @@ mod tests {
     async fn cancelling_a_webview_closes_its_terminals() {
         let mut fx = Fixture::new();
         let (id, mut rx) = fx.open().await;
-        fx.write(id, "echo ready\n");
-        timed(async {
-            let mut seen = Vec::new();
-            while !String::from_utf8_lossy(&seen).contains("ready\r\n") {
-                seen.extend(raw(rx.recv().await.unwrap()));
-            }
-        })
-        .await;
+        fx.echo(id, &mut rx, "ready").await;
         assert_eq!(fx.streams.cancel_webview("other", true), Vec::<Uuid>::new());
         assert_eq!(fx.streams.cancel_webview("main", false), vec![id]);
         timed(fx.exit(id)).await;
@@ -592,10 +600,21 @@ mod tests {
         find(output, START).map(|i| i + START.len())
     }
 
-    /// Exactly what `seq 1 lines` prints to a terminal.
+    /// `seq 1 lines` with the terminal's newline translation (`onlcr`) off
+    /// while it runs. With it on, the macOS pty driver sometimes writes
+    /// `\r\r\n`: when its output queue fills up between the `\r` it adds and
+    /// the `\n`, it later retries the whole `\n`, adding the `\r` again. The
+    /// handover test fills that queue on purpose (flow control stalls the
+    /// output), so it would fail now and then. `stty` prints nothing, so the
+    /// marked output is still exactly `seq`'s.
+    fn raw_seq(lines: u64) -> String {
+        format!("stty -onlcr; seq 1 {lines}; stty onlcr")
+    }
+
+    /// Exactly what [`raw_seq`] prints to a terminal.
     fn seq_output(lines: u64) -> Vec<u8> {
         (1..=lines)
-            .flat_map(|n| format!("{n}\r\n").into_bytes())
+            .flat_map(|n| format!("{n}\n").into_bytes())
             .collect()
     }
 
@@ -612,7 +631,7 @@ mod tests {
         let mut fx = Fixture::new();
         let (id, mut a) = fx.open().await;
         let shell = fx.terminals.list().first().map(|t| t.shell.clone());
-        let command = marked(&format!("seq 1 {LINES}"));
+        let command = marked(&raw_seq(LINES));
         fx.write(id, &format!("{command}; exit 0\n"));
 
         // The source gets some of it, then pauses: what it has received by
@@ -710,12 +729,7 @@ mod tests {
     async fn failed_handovers_are_undone_or_expire() {
         let mut fx = Fixture::new();
         let (id, mut a) = fx.open().await;
-        fx.write(id, "echo one\n");
-        let mut seen = Vec::new();
-        receive_until(&mut a, &mut seen, |s| {
-            String::from_utf8_lossy(s).contains("one\r\n")
-        })
-        .await;
+        fx.echo(id, &mut a, "one").await;
 
         // Taken back before the target attached: the source resumes.
         fx.streams.pause(id, "main").unwrap();
@@ -723,11 +737,7 @@ mod tests {
         assert!(!fx.streams.resume(id, "main"));
         assert!(fx.streams.reclaim(id, "main", "target"));
         assert!(fx.streams.resume(id, "main"));
-        fx.write(id, "echo two\n");
-        receive_until(&mut a, &mut seen, |s| {
-            String::from_utf8_lossy(s).contains("two\r\n")
-        })
-        .await;
+        fx.echo(id, &mut a, "two").await;
 
         // The target never attaches: the handover expires and the terminal
         // closes.
@@ -741,12 +751,7 @@ mod tests {
 
         // Closing the target window cancels what was handed to it.
         let (id, mut a) = fx.open().await;
-        fx.write(id, "echo ready\n");
-        let mut seen = Vec::new();
-        receive_until(&mut a, &mut seen, |s| {
-            String::from_utf8_lossy(s).contains("ready\r\n")
-        })
-        .await;
+        fx.echo(id, &mut a, "ready").await;
         fx.streams.pause(id, "main").unwrap();
         fx.streams.hand_over(id, "main", "target").unwrap();
         assert!(fx.streams.cancel_webview("main", true).is_empty());

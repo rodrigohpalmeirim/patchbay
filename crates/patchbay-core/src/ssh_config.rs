@@ -1645,15 +1645,13 @@ mod tests {
     #[test]
     fn agent_values() {
         let c = parse("Host a\n IdentityAgent none\nHost b\n IdentityAgent SSH_AUTH_SOCK\n");
-        assert_eq!(
-            c.resolve("a", "me").identity_agent,
-            Some(AgentSource::Disabled)
-        );
-        assert_eq!(
-            c.resolve("b", "me").identity_agent,
-            Some(AgentSource::Default)
-        );
-        assert_eq!(c.resolve("c", "me").identity_agent, None);
+        for (host, want) in [
+            ("a", Some(AgentSource::Disabled)),
+            ("b", Some(AgentSource::Default)),
+            ("c", None),
+        ] {
+            assert_eq!(c.resolve(host, "me").identity_agent, want, "{host}");
+        }
     }
 
     #[test]
@@ -1712,55 +1710,32 @@ mod tests {
              LocalForward 1 2 3\n",
         );
         let r = c.resolve("f", "me");
+        let tcp = |host: Option<&str>, port| ForwardEndpoint::Tcp {
+            host: host.map(Into::into),
+            port,
+        };
+        let spec = |kind, listen, connect| ForwardSpec {
+            kind,
+            listen,
+            connect,
+        };
+        use ForwardKind::{Dynamic, Local, Remote};
         assert_eq!(
             r.forwards,
-            vec![
-                ForwardSpec {
-                    kind: ForwardKind::Local,
-                    listen: ForwardEndpoint::Tcp {
-                        host: None,
-                        port: 8080
-                    },
-                    connect: Some(ForwardEndpoint::Tcp {
-                        host: Some("localhost".into()),
-                        port: 80
-                    }),
-                },
-                ForwardSpec {
-                    kind: ForwardKind::Local,
-                    listen: ForwardEndpoint::Tcp {
-                        host: Some("::1".into()),
-                        port: 9000
-                    },
-                    connect: Some(ForwardEndpoint::Tcp {
-                        host: Some("fe80::1".into()),
-                        port: 22
-                    }),
-                },
-                ForwardSpec {
-                    kind: ForwardKind::Remote,
-                    listen: ForwardEndpoint::Tcp {
-                        host: Some("0.0.0.0".into()),
-                        port: 2222
-                    },
-                    connect: Some(ForwardEndpoint::Unix("/run/sock".into())),
-                },
-                ForwardSpec {
-                    kind: ForwardKind::Remote,
-                    listen: ForwardEndpoint::Tcp {
-                        host: None,
-                        port: 1080
-                    },
-                    connect: None,
-                },
-                ForwardSpec {
-                    kind: ForwardKind::Dynamic,
-                    listen: ForwardEndpoint::Tcp {
-                        host: Some("*".into()),
-                        port: 1081
-                    },
-                    connect: None,
-                },
+            [
+                spec(Local, tcp(None, 8080), Some(tcp(Some("localhost"), 80))),
+                spec(
+                    Local,
+                    tcp(Some("::1"), 9000),
+                    Some(tcp(Some("fe80::1"), 22))
+                ),
+                spec(
+                    Remote,
+                    tcp(Some("0.0.0.0"), 2222),
+                    Some(ForwardEndpoint::Unix("/run/sock".into()))
+                ),
+                spec(Remote, tcp(None, 1080), None),
+                spec(Dynamic, tcp(Some("*"), 1081), None),
             ]
         );
         assert_eq!(r.warnings.len(), 1);

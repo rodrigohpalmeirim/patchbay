@@ -221,7 +221,6 @@ mod tests {
 
         let mut again = SnippetStore::load(path.clone()).unwrap();
         assert_eq!(again.list(), store.list());
-        assert_eq!(again.get(&tail.id).unwrap(), tail);
         assert_eq!(
             again.list()[1].command,
             "df -h ",

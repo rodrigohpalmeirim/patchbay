@@ -604,20 +604,18 @@ mod tests {
 
     #[test]
     fn windows_paths() {
-        assert_eq!(
-            windows_path("/C:/Users/me").as_deref(),
-            Some(r"C:\Users\me")
-        );
-        assert_eq!(
-            windows_path("/C:/Users/me/").as_deref(),
-            Some(r"C:\Users\me")
-        );
-        assert_eq!(windows_path("/d:").as_deref(), Some(r"d:\"));
-        assert_eq!(windows_path("/D:/").as_deref(), Some(r"D:\"));
-        assert_eq!(windows_path("C:/x y/ü").as_deref(), Some(r"C:\x y\ü"));
-        assert_eq!(windows_path("/"), None);
-        assert_eq!(windows_path("/home/me"), None);
-        assert_eq!(windows_path("/C:foo"), None);
+        for (sftp, expected) in [
+            ("/C:/Users/me", Some(r"C:\Users\me")),
+            ("/C:/Users/me/", Some(r"C:\Users\me")),
+            ("/d:", Some(r"d:\")),
+            ("/D:/", Some(r"D:\")),
+            ("C:/x y/ü", Some(r"C:\x y\ü")),
+            ("/", None),
+            ("/home/me", None),
+            ("/C:foo", None),
+        ] {
+            assert_eq!(windows_path(sftp).as_deref(), expected, "{sftp}");
+        }
     }
 
     #[test]

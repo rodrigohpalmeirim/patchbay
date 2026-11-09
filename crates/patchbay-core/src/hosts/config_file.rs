@@ -753,6 +753,11 @@ mod tests {
                 .insert(&entry("b", "b.lan"))),
             "Host a\n\nHost b\n    HostName b.lan\n\nHost x?\nHost *\n"
         );
+        // A BOM stays first.
+        assert_eq!(
+            edited("\u{feff}Host a\n", |c| c.insert(&entry("b", "b"))),
+            "\u{feff}Host a\n\nHost b\n    HostName b\n"
+        );
         let entries = ConfigFile::parse(&edited("", |c| c.insert(&full))).entries();
         assert_eq!(entries, [full]);
     }
@@ -814,18 +819,19 @@ mod tests {
     #[test]
     fn remove_block() {
         let text = "# h\n\nHost a\n  HostName x\n  # about b\n\nHost b\n  HostName y\n\nHost c\n";
-        assert_eq!(
-            edited(text, |c| assert!(c.remove("a"))),
-            "# h\n\n  # about b\n\nHost b\n  HostName y\n\nHost c\n"
-        );
-        assert_eq!(
-            edited(text, |c| assert!(c.remove("b"))),
-            "# h\n\nHost a\n  HostName x\n  # about b\n\nHost c\n"
-        );
-        assert_eq!(
-            edited(text, |c| assert!(c.remove("c"))),
-            "# h\n\nHost a\n  HostName x\n  # about b\n\nHost b\n  HostName y\n"
-        );
+        for (alias, want) in [
+            (
+                "a",
+                "# h\n\n  # about b\n\nHost b\n  HostName y\n\nHost c\n",
+            ),
+            ("b", "# h\n\nHost a\n  HostName x\n  # about b\n\nHost c\n"),
+            (
+                "c",
+                "# h\n\nHost a\n  HostName x\n  # about b\n\nHost b\n  HostName y\n",
+            ),
+        ] {
+            assert_eq!(edited(text, |c| assert!(c.remove(alias))), want, "{alias}");
+        }
         assert_eq!(edited("Host a\n", |c| assert!(c.remove("a"))), "");
         assert_eq!(
             edited("Host a b\n", |c| assert!(!c.remove("a"))),
@@ -841,15 +847,6 @@ mod tests {
         assert_eq!(
             c.render(),
             "Host a\n  ProxyJump=u@gate:2,x\nHost b\n  proxyjump x\n"
-        );
-    }
-
-    #[test]
-    fn bom_is_kept() {
-        let text = "\u{feff}Host a\n";
-        assert_eq!(
-            edited(text, |c| c.insert(&entry("b", "b"))),
-            "\u{feff}Host a\n\nHost b\n    HostName b\n"
         );
     }
 

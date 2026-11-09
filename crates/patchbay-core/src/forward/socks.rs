@@ -266,15 +266,13 @@ mod tests {
     #[tokio::test]
     async fn replies() {
         let mut out = Vec::new();
-        reply(&mut out, Version::V5, Reply::Succeeded)
-            .await
-            .unwrap();
-        reply(&mut out, Version::V5, Reply::ConnectionRefused)
-            .await
-            .unwrap();
-        reply(&mut out, Version::V4, Reply::Succeeded)
-            .await
-            .unwrap();
+        for (version, r) in [
+            (Version::V5, Reply::Succeeded),
+            (Version::V5, Reply::ConnectionRefused),
+            (Version::V4, Reply::Succeeded),
+        ] {
+            reply(&mut out, version, r).await.unwrap();
+        }
         assert_eq!(
             out,
             [

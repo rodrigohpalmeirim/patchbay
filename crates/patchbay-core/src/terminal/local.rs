@@ -408,14 +408,13 @@ mod tests {
             ("HOME", "/home/me"),
         ]);
         let get = |key: &str| out.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
-        assert_eq!(get("APPDIR"), Some(None));
-        assert_eq!(get("APPIMAGE"), Some(None));
-        assert_eq!(get("OWD"), Some(None));
+        for key in ["APPDIR", "APPIMAGE", "OWD", "GTK_PATH"] {
+            assert_eq!(get(key), Some(None), "{key} is unset");
+        }
         assert_eq!(
             get("XDG_DATA_DIRS"),
             Some(Some("/usr/local/share:/usr/share".into()))
         );
-        assert_eq!(get("GTK_PATH"), Some(None));
         assert_eq!(get("HOME"), None);
     }
 
