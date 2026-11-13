@@ -117,8 +117,12 @@
   const showTabs = $derived(edits.list.length > 0 || transfers.tab === "editing");
   const tab = $derived(showTabs ? transfers.tab : "transfers");
 
-  const height = $derived(Math.min(filePrefs.transfersHeight, Math.max(PANEL_MIN, (typeof window !== "undefined" ? window.innerHeight : 800) * PANEL_MAX_FRACTION)));
+  /** Window height, kept current so the panel's cap follows window resizes. */
+  let vh = $state(800);
+  const height = $derived(Math.min(filePrefs.transfersHeight, Math.max(PANEL_MIN, vh * PANEL_MAX_FRACTION)));
 </script>
+
+<svelte:window bind:innerHeight={vh} />
 
 {#if transfers.open}
   <section class="panel" class:resizing style:height="{height}px" aria-label={tab === "editing" ? "Editing" : "Transfers"}>
