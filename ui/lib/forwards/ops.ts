@@ -122,15 +122,27 @@ export function forwardAddress(f: PortForward, s?: PortForwardStatus): string {
 const WEB_PORTS = new Set([80, 443, 3000, 3001, 4000, 4200, 5000, 5173, 5601, 8000, 8008, 8080, 8081, 8088, 8443, 8888, 9000, 9090, 15672]);
 const TLS_PORTS = new Set([443, 8443]);
 
-/** A URL to open for local forwards to web-looking services (needs the live port). */
-export function browserUrl(f: PortForward, s: PortForwardStatus): string | null {
+/**
+ * The live address of a running local forward as a URL, whatever is behind it
+ * (needs the live port). The scheme is a guess from the target: https for
+ * well-known TLS ports, else http.
+ */
+export function addressUrl(f: PortForward, s: PortForwardStatus): string | null {
   if (f.kind !== "local" || s.state !== "active") return null;
   const port = Number(s.address.slice(s.address.lastIndexOf(":") + 1));
-  const looksWeb = /^https?:\/\//i.test(f.targetHost ?? "") || WEB_PORTS.has(f.targetPort ?? -1) || WEB_PORTS.has(f.bindPort);
-  if (!looksWeb || !Number.isFinite(port) || port <= 0) return null;
+  if (!Number.isFinite(port) || port <= 0) return null;
   const tls = TLS_PORTS.has(f.targetPort ?? -1) || /^https:/i.test(f.targetHost ?? "");
   const host = isAllInterfaces(f.bindAddress) || isLoopback(f.bindAddress) ? "localhost" : f.bindAddress!;
   return `${tls ? "https" : "http"}://${hostPort(host, port)}/`;
+}
+
+/**
+ * `addressUrl` for forwards worth a one-click "open in browser": the port is a
+ * well-known web one, or the target answered the core's HTTP probe.
+ */
+export function browserUrl(f: PortForward, s: PortForwardStatus): string | null {
+  const looksWeb = /^https?:\/\//i.test(f.targetHost ?? "") || WEB_PORTS.has(f.targetPort ?? -1) || WEB_PORTS.has(f.bindPort);
+  return looksWeb || s.speaksHttp ? addressUrl(f, s) : null;
 }
 
 export async function copyAddress(f: PortForward) {
@@ -196,7 +208,8 @@ export function openForwards(hostId: HostId | null) {
 export function forwardMenuItems(f: PortForward, { showHost = true } = {}): MenuItem[] {
   const s = forwards.status(f.id);
   const running = isRunning(s);
-  const url = browserUrl(f, s);
+  // Offered for every running local forward, in case the probe is wrong or late.
+  const url = addressUrl(f, s);
   const items: MenuItem[] = [
     running
       ? { label: "Stop", icon: Square, onSelect: () => void forwards.stop(f.id) }

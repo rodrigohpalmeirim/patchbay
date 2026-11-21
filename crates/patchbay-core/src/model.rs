@@ -937,6 +937,7 @@ mod tests {
             total_connections: 7,
             bytes_in: 10,
             bytes_out: 20,
+            speaks_http: true,
         };
         assert_eq!(
             serde_json::to_value(CoreEvent::PortForward(status(
@@ -949,7 +950,7 @@ mod tests {
             json!({
                 "type": "portForward", "id": "fwd:1", "state": "reconnecting", "attempt": 3,
                 "message": "lost", "openConnections": 2, "totalConnections": 7,
-                "bytesIn": 10, "bytesOut": 20
+                "bytesIn": 10, "bytesOut": 20, "speaksHttp": true
             })
         );
         // The flattening is pinned above; the other states only need their tags.
@@ -1175,6 +1176,8 @@ pub struct PortForwardStatus {
     pub bytes_in: u64,
     /// Bytes from the connecting clients towards the destination.
     pub bytes_out: u64,
+    /// The target answered an HTTP request (local forwards only).
+    pub speaks_http: bool,
 }
 
 // ---------------------------------------------------------------------------

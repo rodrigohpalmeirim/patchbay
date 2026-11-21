@@ -11,7 +11,9 @@
 //!
 //! - **Local** (`-L`): listens on this machine (see [`listen`] for bind
 //!   addresses) and opens a `direct-tcpip` channel to the destination on the
-//!   host for every accepted connection.
+//!   host for every accepted connection. While active, the destination is
+//!   also asked once whether it speaks HTTP (see [`probe`]; reported as
+//!   `speaks_http`).
 //! - **Dynamic** (`-D`): a SOCKS4/4a/5 server on this machine; each
 //!   `CONNECT` becomes a `direct-tcpip` channel.
 //! - **Remote** (`-R`): asks the host to listen (`tcpip-forward`; default
@@ -49,6 +51,7 @@
 //! connection instead of failing.
 
 mod listen;
+mod probe;
 mod pump;
 pub mod rules;
 mod socks;
@@ -412,6 +415,7 @@ fn stopped(id: &str) -> PortForwardStatus {
         total_connections: 0,
         bytes_in: 0,
         bytes_out: 0,
+        speaks_http: false,
     }
 }
 
@@ -648,6 +652,10 @@ impl Runner {
         let via = links.via.clone();
         let target = self.target();
         let mut tunnels = JoinSet::new();
+        // Lives (at most) as long as this active period.
+        let mut probing = self.rule.kind == PortForwardKind::Local;
+        let probe = probe_target(main.clone(), target.clone(), self.cell.clone());
+        tokio::pin!(probe);
         loop {
             tokio::select! {
                 () = stop_requested(&mut self.stop) => return None,
@@ -681,6 +689,7 @@ impl Runner {
                     }
                 }
                 Some(_) = tunnels.join_next(), if !tunnels.is_empty() => {}
+                () = &mut probe, if probing => probing = false,
             }
         }
     }
@@ -728,13 +737,27 @@ async fn local_connection(
 ) {
     let _guard = cell.connection();
     match conn.open_direct_tcpip(&host, port, peer).await {
-        Ok(channel) => pump::pump(socket, channel.into_stream(), &cell).await,
+        Ok(channel) => {
+            cell.kick_probe();
+            pump::pump(socket, channel.into_stream(), &cell).await
+        }
         Err(e) => tracing::info!(
             forward = %cell.id(),
             "cannot open a tunnel to {}: {e}",
             join_host_port(&host, port)
         ),
     }
+}
+
+/// Finds out whether a local forward's target speaks HTTP (see [`probe`]),
+/// over channels of its own that do not count as connections.
+async fn probe_target(conn: Arc<Connection>, (host, port): (String, u16), cell: Arc<StatusCell>) {
+    let originator = SocketAddr::from(([127, 0, 0, 1], 0));
+    let open = || async {
+        let channel = conn.open_direct_tcpip(&host, port, originator).await?;
+        Ok(channel.into_stream())
+    };
+    probe::run(&cell, &join_host_port(&host, port), open).await
 }
 
 async fn socks_connection(

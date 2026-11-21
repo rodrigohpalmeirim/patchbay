@@ -33,6 +33,7 @@ const idle = (id: string): PortForwardStatus => ({
   totalConnections: 0,
   bytesIn: 0,
   bytesOut: 0,
+  speaksHttp: false,
 });
 
 /** Rates decay to zero when no counter update arrives for this long. */
