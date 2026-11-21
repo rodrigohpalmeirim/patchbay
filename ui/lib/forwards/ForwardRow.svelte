@@ -20,7 +20,7 @@
   import type { PortForward } from "../types";
   import { sentence } from "../util/errors";
   import { formatBytes, formatSpeed } from "../util/format";
-  import { browserUrl, copyAddress, describeRoute, editForward, KIND_FLAG, KIND_LABEL, listensRemotely, machineName, showForwardMenu } from "./ops";
+  import { addressUrl, browserUrl, copyAddress, describeRoute, editForward, KIND_FLAG, KIND_LABEL, listensRemotely, machineName, showForwardMenu } from "./ops";
   import { openInBrowser } from "../util/links";
 
   let {
@@ -41,6 +41,7 @@
   const running = $derived(isRunning(s));
   const pending = $derived(!!forwards.pending[f.id]);
   const url = $derived(browserUrl(f, s));
+  const addrUrl = $derived(addressUrl(f, s));
 
   const dot = $derived.by((): Status => {
     switch (s.state) {
@@ -121,7 +122,17 @@
     <div class="state {s.state}" aria-live="polite">
       <StatusDot status={dot} size={7} />
       {#if s.state === "active"}
-        <span>Listening on <span class="mono selectable">{listenOn}</span></span>
+        <span
+          >Listening on {#if addrUrl}<a
+              class="mono addr"
+              href={addrUrl}
+              title="Open {addrUrl} in browser"
+              onclick={(e) => {
+                e.preventDefault();
+                void openInBrowser(addrUrl);
+              }}>{listenOn}</a
+            >{:else}<span class="mono selectable">{listenOn}</span>{/if}</span
+        >
         {#if compact}
           <span class="mini" title="{s.openConnections} open connections · received {formatBytes(s.bytesIn)}, sent {formatBytes(s.bytesOut)}">
             · {s.openConnections} {s.openConnections === 1 ? "connection" : "connections"}{rate.in + rate.out >= 1 ? ` · ${formatSpeed(rate.in + rate.out)}` : ""}
@@ -324,6 +335,15 @@
   .state .mono {
     font-size: 11.5px;
     color: var(--text);
+  }
+  .addr {
+    text-decoration: underline;
+    text-decoration-color: var(--text-subtle);
+    text-underline-offset: 2px;
+  }
+  .addr:hover {
+    color: var(--accent-text);
+    text-decoration-color: currentColor;
   }
   .state.reconnecting .strong {
     color: var(--warning-text);

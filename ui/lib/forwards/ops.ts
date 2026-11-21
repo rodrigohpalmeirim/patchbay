@@ -122,15 +122,20 @@ export function forwardAddress(f: PortForward, s?: PortForwardStatus): string {
 const WEB_PORTS = new Set([80, 443, 3000, 3001, 4000, 4200, 5000, 5173, 5601, 8000, 8008, 8080, 8081, 8088, 8443, 8888, 9000, 9090, 15672]);
 const TLS_PORTS = new Set([443, 8443]);
 
-/** A URL to open for local forwards to web-looking services (needs the live port). */
-export function browserUrl(f: PortForward, s: PortForwardStatus): string | null {
+/** A URL for a running local forward's live address, whatever the service behind it. */
+export function addressUrl(f: PortForward, s: PortForwardStatus): string | null {
   if (f.kind !== "local" || s.state !== "active") return null;
   const port = Number(s.address.slice(s.address.lastIndexOf(":") + 1));
-  const looksWeb = /^https?:\/\//i.test(f.targetHost ?? "") || WEB_PORTS.has(f.targetPort ?? -1) || WEB_PORTS.has(f.bindPort);
-  if (!looksWeb || !Number.isFinite(port) || port <= 0) return null;
+  if (!Number.isFinite(port) || port <= 0) return null;
   const tls = TLS_PORTS.has(f.targetPort ?? -1) || /^https:/i.test(f.targetHost ?? "");
   const host = isAllInterfaces(f.bindAddress) || isLoopback(f.bindAddress) ? "localhost" : f.bindAddress!;
   return `${tls ? "https" : "http"}://${hostPort(host, port)}/`;
+}
+
+/** A URL to open for local forwards to web-looking services (needs the live port). */
+export function browserUrl(f: PortForward, s: PortForwardStatus): string | null {
+  const looksWeb = /^https?:\/\//i.test(f.targetHost ?? "") || WEB_PORTS.has(f.targetPort ?? -1) || WEB_PORTS.has(f.bindPort);
+  return looksWeb ? addressUrl(f, s) : null;
 }
 
 export async function copyAddress(f: PortForward) {
