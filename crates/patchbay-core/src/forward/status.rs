@@ -1,10 +1,11 @@
 //! Runtime status of one forward and its throttled publication as
 //! [`CoreEvent::PortForward`].
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::futures::Notified;
 use tokio::sync::{Notify, broadcast, watch};
 
 use crate::Error;
@@ -14,9 +15,9 @@ use crate::session::duplicate_error;
 /// Minimum spacing of traffic/connection-count updates per forward.
 pub const TRAFFIC_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Counters and state of one forward. State changes are published right
-/// away; traffic and connection counts at most every [`TRAFFIC_INTERVAL`]
-/// (see [`StatusCell::publish_traffic`]).
+/// Counters and state of one forward. State changes (and the HTTP probe's
+/// result) are published right away; traffic and connection counts at most
+/// every [`TRAFFIC_INTERVAL`] (see [`StatusCell::publish_traffic`]).
 pub(crate) struct StatusCell {
     id: String,
     events: broadcast::Sender<CoreEvent>,
@@ -25,6 +26,10 @@ pub(crate) struct StatusCell {
     total: AtomicU64,
     bytes_in: AtomicU64,
     bytes_out: AtomicU64,
+    /// The target answered the HTTP probe since the forward became active.
+    speaks_http: AtomicBool,
+    /// Wakes the HTTP probe (see [`StatusCell::kick_probe`]).
+    probe_kick: Notify,
     traffic: Notify,
     /// The error behind a `Failed` state.
     failure: Mutex<Option<Error>>,
@@ -44,6 +49,8 @@ impl StatusCell {
             total: AtomicU64::new(0),
             bytes_in: AtomicU64::new(0),
             bytes_out: AtomicU64::new(0),
+            speaks_http: AtomicBool::new(false),
+            probe_kick: Notify::new(),
             traffic: Notify::new(),
             failure: Mutex::new(None),
         })
@@ -54,13 +61,18 @@ impl StatusCell {
     }
 
     pub(crate) fn snapshot(&self) -> PortForwardStatus {
+        let state = self.state.borrow().clone();
+        // Only an active forward has a probed target, whatever the flag says.
+        let speaks_http = matches!(state, PortForwardState::Active { .. })
+            && self.speaks_http.load(Ordering::Relaxed);
         PortForwardStatus {
             id: self.id.clone(),
-            state: self.state.borrow().clone(),
+            state,
             open_connections: self.open.load(Ordering::Relaxed),
             total_connections: self.total.load(Ordering::Relaxed),
             bytes_in: self.bytes_in.load(Ordering::Relaxed),
             bytes_out: self.bytes_out.load(Ordering::Relaxed),
+            speaks_http,
         }
     }
 
@@ -68,13 +80,23 @@ impl StatusCell {
         self.state.subscribe()
     }
 
-    /// Change the state and publish it (no-op if unchanged).
+    /// Change the state and publish it (no-op if unchanged). The HTTP probe's
+    /// result belongs to one active period, so any change forgets it.
     pub(crate) fn set_state(&self, state: PortForwardState) {
         if self.state.send_if_modified(|s| {
             let changed = *s != state;
             *s = state;
             changed
         }) {
+            self.speaks_http.store(false, Ordering::Relaxed);
+            self.publish();
+        }
+    }
+
+    /// Record that the target answered an HTTP request and publish it (no-op
+    /// if already known).
+    pub(crate) fn set_speaks_http(&self) {
+        if !self.speaks_http.swap(true, Ordering::Relaxed) {
             self.publish();
         }
     }
@@ -84,6 +106,17 @@ impl StatusCell {
         let message = error.to_string();
         *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
         self.set_state(PortForwardState::Failed { message });
+    }
+
+    /// A connection reached the target: worth another try for an HTTP probe
+    /// that could not connect so far (no effect on a decided or idle one).
+    pub(crate) fn kick_probe(&self) {
+        self.probe_kick.notify_waiters();
+    }
+
+    /// Resolves at the next [`StatusCell::kick_probe`].
+    pub(crate) fn probe_kicked(&self) -> Notified<'_> {
+        self.probe_kick.notified()
     }
 
     /// The error behind the current `Failed` state.
@@ -142,6 +175,36 @@ impl Drop for ConnectionGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_result_is_published_once_and_ends_with_the_active_period() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let active = || PortForwardState::Active {
+            address: "127.0.0.1:1".into(),
+        };
+        let cell = StatusCell::new("fwd:x".into(), tx, active());
+
+        cell.set_speaks_http();
+        cell.set_speaks_http();
+        let CoreEvent::PortForward(s) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(s.speaks_http);
+        assert!(rx.try_recv().is_err(), "a known result is not republished");
+
+        cell.set_state(PortForwardState::Reconnecting {
+            attempt: 1,
+            message: "lost".into(),
+        });
+        assert!(!cell.snapshot().speaks_http);
+        cell.set_state(active());
+        assert!(!cell.snapshot().speaks_http, "to be probed again");
+
+        // A result that arrives late does not show on an idle forward.
+        cell.set_state(PortForwardState::Stopped);
+        cell.set_speaks_http();
+        assert!(!cell.snapshot().speaks_http);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn traffic_is_throttled_and_states_are_immediate() {

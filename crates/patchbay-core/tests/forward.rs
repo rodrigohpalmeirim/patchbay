@@ -304,6 +304,65 @@ async fn echo_server() -> u16 {
     port
 }
 
+const HTTP_OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+/// A server on 127.0.0.1 that greets each client with `banner`, answers its
+/// request head with `reply` and hangs up. Returns its port and, per
+/// finished connection, what the client sent.
+async fn text_server(
+    banner: &'static str,
+    reply: &'static str,
+) -> (u16, mpsc::UnboundedReceiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 1024];
+                let _ = socket.write_all(banner.as_bytes()).await;
+                while !seen.ends_with(b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = socket.write_all(reply.as_bytes()).await;
+                let _ = tx.send(String::from_utf8_lossy(&seen).into_owned());
+            });
+        }
+    });
+    (port, rx)
+}
+
+/// Makes `127.0.0.1:local` on this machine reachable as `localhost:port` on
+/// `cfg:target` (with a remote forward), i.e. as a local forward's target.
+async fn expose_on_target(fx: &Fx, local: u16, port: u16) {
+    let rule = fx
+        .create(PortForwardDraft {
+            bind_port: port,
+            target_host: Some("127.0.0.1".into()),
+            target_port: Some(local),
+            ..draft(PortForwardKind::Remote, "cfg:target")
+        })
+        .await;
+    timed(fx.forwards.start(&rule.id)).await.unwrap();
+}
+
+/// Starts a local forward through `cfg:target` to `localhost:port` there.
+async fn local_forward_to(fx: &Fx, port: u16) -> PortForward {
+    let rule = fx
+        .create(PortForwardDraft {
+            target_port: Some(port),
+            ..draft(PortForwardKind::Local, "cfg:target")
+        })
+        .await;
+    timed(fx.forwards.start(&rule.id)).await.unwrap();
+    rule
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn port_in_use_fails() {
     let fx = Fx::friendly();
@@ -391,6 +450,91 @@ async fn local_forward_reaches_sshd() {
         ]
     );
     assert_eq!(fx.prompt_count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_tells_whether_the_target_speaks_http() {
+    require_docker!();
+    let fx = Fx::friendly();
+
+    // A server that speaks first is not HTTP, and is sent nothing.
+    let (server, mut requests) = text_server("220 test ESMTP\r\n", "").await;
+    let port = remote_port();
+    expose_on_target(&fx, server, port).await;
+    let mail = local_forward_to(&fx, port).await;
+    assert_eq!(timed(requests.recv()).await.unwrap(), "");
+    let s = fx.status(&mail.id).await;
+    assert!(is_active(&s) && !s.speaks_http, "{s:?}");
+
+    let (server, mut requests) = text_server("", HTTP_OK).await;
+    let port = remote_port();
+    expose_on_target(&fx, server, port).await;
+    let web = local_forward_to(&fx, port).await;
+    let s = fx.wait_status(&web.id, |s| s.speaks_http).await;
+    assert_eq!(
+        (s.total_connections, s.bytes_in, s.bytes_out),
+        (0, 0, 0),
+        "the probe is not traffic"
+    );
+    let request = timed(requests.recv()).await.unwrap();
+    assert!(
+        request.starts_with(&format!("HEAD / HTTP/1.1\r\nHost: localhost:{port}\r\n")),
+        "{request:?}"
+    );
+
+    // Unknown again while reconnecting; then the target is asked again.
+    fx.kill_connection("cfg:target").await;
+    let s = fx.wait_status(&web.id, |s| !is_active(s)).await;
+    assert!(!s.speaks_http, "{s:?}");
+    let s = fx.wait_status(&web.id, |s| s.speaks_http).await;
+    assert!(is_active(&s) && s.total_connections == 0, "{s:?}");
+    assert!(timed(requests.recv()).await.unwrap().starts_with("HEAD "));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_finds_a_target_that_starts_late() {
+    require_docker!();
+    let fx = Fx::friendly();
+    let port = remote_port();
+    let rule = local_forward_to(&fx, port).await;
+    let address = active_address(&fx.status(&rule.id).await);
+
+    // Nothing listens on the target until now. A connection that gets
+    // through has it probed again at once; a timed retry may get there
+    // first, which this test cannot tell apart.
+    let (server, _requests) = text_server("", HTTP_OK).await;
+    expose_on_target(&fx, server, port).await;
+    let mut stream = timed(TcpStream::connect(&address)).await.unwrap();
+    stream.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+    let mut reply = String::new();
+    timed(stream.read_to_string(&mut reply)).await.unwrap();
+    assert_eq!(reply, HTTP_OK);
+
+    let s = fx.wait_status(&rule.id, |s| s.speaks_http).await;
+    assert_eq!(s.total_connections, 1, "only the real connection counts");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_retries_a_target_that_hangs_up() {
+    require_docker!();
+    let fx = Fx::friendly();
+    // Like a proxy whose backend is still starting: the first client is
+    // accepted and dropped, later ones get an answer.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        drop(listener.accept().await);
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let _ = socket.read(&mut [0u8; 1024]).await;
+            let _ = socket.write_all(HTTP_OK.as_bytes()).await;
+        }
+    });
+    let port = remote_port();
+    expose_on_target(&fx, server, port).await;
+    let rule = local_forward_to(&fx, port).await;
+
+    let s = fx.wait_status(&rule.id, |s| s.speaks_http).await;
+    assert_eq!(s.total_connections, 0, "found by a timed retry");
 }
 
 #[tokio::test(flavor = "multi_thread")]

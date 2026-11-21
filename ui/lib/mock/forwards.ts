@@ -12,6 +12,9 @@
 //                                    reconnect them
 //   explicit disconnect              stops the host's forwards
 //   Production Postgres              auto-start (starts with the "app")
+//   local forwards to web services   answer the HTTP probe a moment after they
+//                                    come up (Home Assistant shows it: its port
+//                                    isn't a well-known web one)
 
 import type { Backend } from "../api";
 import type {
@@ -86,6 +89,15 @@ const INITIAL: PortForward[] = [
     targetPort: 6379,
   }),
   rule({
+    id: "fwd:7c3f1a96-hass",
+    name: "Home Assistant",
+    kind: "local",
+    hostId: PI,
+    bindPort: 8123,
+    targetHost: "localhost",
+    targetPort: 8123,
+  }),
+  rule({
     id: "fwd:c7a90e44-socks",
     name: "SOCKS proxy",
     kind: "dynamic",
@@ -141,6 +153,9 @@ const INITIAL: PortForward[] = [
   }),
 ];
 
+/** Target ports with an HTTP server behind them (what the core's probe would find). */
+const HTTP_TARGET_PORTS = new Set([80, 3000, 8123]);
+
 /** Local ports some other program on "this computer" already listens on. */
 const BUSY_LOCAL_PORTS = new Set([3000, 631]);
 
@@ -185,6 +200,7 @@ interface Runtime {
   gen: number;
   traffic?: ReturnType<typeof setInterval>;
   retry?: ReturnType<typeof setTimeout>;
+  probe?: ReturnType<typeof setTimeout>;
   /** Ephemeral port picked for bindPort 0. */
   autoPort?: number;
 }
@@ -221,6 +237,7 @@ export function createForwards(deps: ForwardsDeps) {
     totalConnections: 0,
     bytesIn: 0,
     bytesOut: 0,
+    speaksHttp: false,
   });
 
   const rt = (id: string): Runtime => {
@@ -244,17 +261,20 @@ export function createForwards(deps: ForwardsDeps) {
 
   const set = (f: PortForward, patch: Partial<PortForwardStatus> & Pick<PortForwardStatus, "state">) => {
     const r = rt(f.id);
-    // Rebuild so fields of the previous state (address, attempt…) don't linger.
+    // Rebuild so fields of the previous state (address, attempt…) don't linger;
+    // the probe's answer only lasts while active.
     const { id, openConnections, totalConnections, bytesIn, bytesOut } = r.status;
-    r.status = { id, openConnections, totalConnections, bytesIn, bytesOut, ...patch } as PortForwardStatus;
+    r.status = { id, openConnections, totalConnections, bytesIn, bytesOut, speaksHttp: false, ...patch } as PortForwardStatus;
     publish(r);
   };
 
   const clearTimers = (r: Runtime) => {
     clearInterval(r.traffic);
     clearTimeout(r.retry);
+    clearTimeout(r.probe);
     r.traffic = undefined;
     r.retry = undefined;
+    r.probe = undefined;
   };
 
   const loopback = (addr: string | null) => addr ?? "127.0.0.1";
@@ -291,6 +311,15 @@ export function createForwards(deps: ForwardsDeps) {
   function activate(f: PortForward, r: Runtime) {
     set(f, { state: "active", address: address(f, r) });
     startTraffic(f, r);
+    // The HTTP probe answers a moment later.
+    clearTimeout(r.probe);
+    if (f.kind === "local" && HTTP_TARGET_PORTS.has(f.targetPort ?? -1)) {
+      r.probe = setTimeout(() => {
+        if (r.status.state !== "active") return;
+        r.status = { ...r.status, speaksHttp: true };
+        publish(r);
+      }, 600);
+    }
   }
 
   /** Hosts a forward needs connected. */

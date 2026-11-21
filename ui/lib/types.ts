@@ -416,6 +416,8 @@ export type PortForwardStatus = {
   totalConnections: number;
   bytesIn: number;
   bytesOut: number;
+  /** The target answered an HTTP request (local forwards only; false unless active). */
+  speaksHttp: boolean;
 } & PortForwardState;
 
 /** Settings the backend acts on. UI-only preferences stay in localStorage. */
