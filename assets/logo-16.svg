@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- logo.svg hand-fitted to the 16px pixel grid (icon.ico 16x16 frame only): jacks snapped to
+       whole pixels, empty jacks as dots, heavier cables and plugs. -->
+  <defs>
+    <linearGradient id="bg" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#334155"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+  </defs>
+  <rect width="16" height="16" rx="3" fill="url(#bg)"/>
+  <g fill="#e0e7ff" fill-opacity="0.75">
+    <circle cx="12" cy="5" r="1.1"/><circle cx="8" cy="11" r="1.1"/>
+  </g>
+  <g fill="none" stroke-linecap="round">
+    <path d="M8 5 C8 9 4 7 4 11" stroke="#5eead4" stroke-width="1.4"/>
+    <path d="M4 5 C4 10 12 6 12 11" stroke="#020617" stroke-opacity="0.35" stroke-width="2.4"/>
+    <path d="M4 5 C4 10 12 6 12 11" stroke="#fbbf24" stroke-width="1.4"/>
+  </g>
+  <g>
+    <circle cx="8" cy="5" r="1.25" fill="#5eead4"/><circle cx="4" cy="11" r="1.25" fill="#5eead4"/>
+    <circle cx="4" cy="5" r="1.25" fill="#fbbf24"/><circle cx="12" cy="11" r="1.25" fill="#fbbf24"/>
+  </g>
+</svg>

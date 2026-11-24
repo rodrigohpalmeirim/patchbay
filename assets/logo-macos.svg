@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- logo.svg on Apple's macOS icon grid (icon.icns only): 824px body at 100px, continuous
+       corners (r=185.4), template drop shadow. The artwork is logo.svg's, scaled 824/896. -->
+  <defs>
+    <linearGradient id="bg" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#334155"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <path filter="url(#shadow)" fill="url(#bg)" d="M383.41 100H640.59C722.19 100 763 100 806.92 113.89C854.88 131.34 892.66 169.12 910.11 217.08C924 261 924 301.81 924 383.41V640.59C924 722.19 924 763 910.11 806.92C892.66 854.88 854.88 892.66 806.92 910.11C763 924 722.19 924 640.59 924H383.41C301.81 924 261 924 217.08 910.11C169.12 892.66 131.34 854.88 113.89 806.92C100 763 100 722.19 100 640.59V383.41C100 301.81 100 261 113.89 217.08C131.34 169.12 169.12 131.34 217.08 113.89C261 100 301.81 100 383.41 100Z"/>
+  <g transform="matrix(0.919643 0 0 0.919643 41.143 41.143)">
+    <g fill="#020617" fill-opacity="0.45" stroke="#e0e7ff" stroke-width="26">
+      <circle cx="292" cy="372" r="62"/><circle cx="512" cy="372" r="62"/><circle cx="732" cy="372" r="62"/>
+      <circle cx="292" cy="652" r="62"/><circle cx="512" cy="652" r="62"/><circle cx="732" cy="652" r="62"/>
+    </g>
+    <g fill="none" stroke-linecap="round">
+      <path d="M512 372 C512 560 292 464 292 652" stroke="#5eead4" stroke-width="60"/>
+      <path d="M292 372 C292 600 732 424 732 652" stroke="#020617" stroke-opacity="0.3" stroke-width="100"/>
+      <path d="M292 372 C292 600 732 424 732 652" stroke="#fbbf24" stroke-width="60"/>
+    </g>
+    <g>
+      <circle cx="512" cy="372" r="49" fill="#5eead4"/><circle cx="292" cy="652" r="49" fill="#5eead4"/>
+      <circle cx="292" cy="372" r="49" fill="#fbbf24"/><circle cx="732" cy="652" r="49" fill="#fbbf24"/>
+    </g>
+  </g>
+</svg>

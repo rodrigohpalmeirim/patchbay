@@ -73,6 +73,15 @@ docker compose -f docker/test/compose.yml down
 Addresses, users, keys and sample files are documented in
 [docker/test/README.md](docker/test/README.md).
 
+### App icon
+
+`assets/logo.svg` is the full-bleed logo (Windows `.ico`, Linux PNGs, README, favicon,
+`ui/lib/components/Logo.svelte`). `assets/logo-16.svg` and `logo-24.svg` are pixel-fitted
+versions for the small `.ico` frames, and `assets/logo-macos.svg` puts the same artwork on
+Apple's icon grid for `icon.icns`. After changing the artwork, update all of them (and
+`ui/public/favicon.svg` / `Logo.svelte`), then run `scripts/dev.sh scripts/icons.sh` to
+regenerate `src-tauri/icons/`.
+
 ## Before opening a pull request
 
 CI runs these on Linux, macOS and Windows, so running them locally saves a round trip:

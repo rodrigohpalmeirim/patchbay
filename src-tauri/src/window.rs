@@ -45,8 +45,8 @@ use std::time::Duration;
 use patchbay_core::layouts::{Layouts, SavedWindow, WindowGeometry};
 use serde::Serialize;
 use tauri::{
-    AppHandle, CloseRequestApi, Emitter, EventTarget, Manager, PhysicalPosition, PhysicalSize,
-    WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
+    AppHandle, CloseRequestApi, Emitter, EventTarget, LogicalSize, Manager, PhysicalPosition,
+    PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
 };
 use tokio::sync::Notify;
 
@@ -416,6 +416,12 @@ pub fn init(app: &AppHandle) {
     if let Some(main) = app.get_webview_window(MAIN) {
         if CUSTOM_TITLEBAR {
             let _ = main.set_decorations(false);
+            // On Windows the title bar it had becomes part of the page:
+            // back to the default size, unless a saved one follows.
+            if geometry.is_none() {
+                let _ = main.set_size(LogicalSize::new(DEFAULT_SIZE.0, DEFAULT_SIZE.1));
+                let _ = main.center();
+            }
         }
         place(&main, geometry);
     }
